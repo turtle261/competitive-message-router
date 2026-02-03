@@ -1,0 +1,77 @@
+use std::io::{BufReader, BufWriter};
+use std::process::{Command, Stdio};
+
+use cmr_core::compressor_ipc::{CompressorRequest, CompressorResponse, read_frame, write_frame};
+
+#[test]
+fn compressor_worker_handles_health_and_metric_requests() {
+    let bin = env!("CARGO_BIN_EXE_cmr-compressor");
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn worker");
+    let mut stdin = BufWriter::new(child.stdin.take().expect("stdin"));
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+    write_frame(&mut stdin, &CompressorRequest::Health).expect("send health");
+    let health: CompressorResponse = read_frame(&mut stdout, 1024 * 1024).expect("read health");
+    assert!(matches!(health, CompressorResponse::Health { ok: true }));
+
+    write_frame(
+        &mut stdin,
+        &CompressorRequest::NcdSym {
+            left: b"hello world".to_vec(),
+            right: b"hello world".to_vec(),
+        },
+    )
+    .expect("send ncd");
+    let ncd: CompressorResponse = read_frame(&mut stdout, 1024 * 1024).expect("read ncd");
+    let ncd_value = match ncd {
+        CompressorResponse::NcdSym { value } => value,
+        other => panic!("unexpected response: {other:?}"),
+    };
+    assert!(ncd_value.is_finite());
+    assert!(ncd_value >= 0.0);
+
+    write_frame(
+        &mut stdin,
+        &CompressorRequest::IntrinsicDependence {
+            data: b"aaaaabbbbbcccccdddddeeeee".to_vec(),
+            max_order: 8,
+        },
+    )
+    .expect("send id");
+    let id: CompressorResponse = read_frame(&mut stdout, 1024 * 1024).expect("read id");
+    let id_value = match id {
+        CompressorResponse::IntrinsicDependence { value } => value,
+        other => panic!("unexpected response: {other:?}"),
+    };
+    assert!(id_value.is_finite());
+    assert!((0.0..=1.0).contains(&id_value));
+
+    write_frame(
+        &mut stdin,
+        &CompressorRequest::BatchNcdSym {
+            target: b"planet jupiter".to_vec(),
+            candidates: vec![
+                b"planet saturn".to_vec(),
+                b"planet mars".to_vec(),
+                b"random noise text".to_vec(),
+            ],
+        },
+    )
+    .expect("send batch ncd");
+    let batch: CompressorResponse = read_frame(&mut stdout, 1024 * 1024).expect("read batch");
+    let values = match batch {
+        CompressorResponse::BatchNcdSym { values } => values,
+        other => panic!("unexpected response: {other:?}"),
+    };
+    assert_eq!(values.len(), 3);
+    assert!(values.iter().all(|v| v.is_finite()));
+
+    drop(stdin);
+    let status = child.wait().expect("wait child");
+    assert!(status.success());
+}

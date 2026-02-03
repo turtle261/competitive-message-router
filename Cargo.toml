@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/cmr-core",
+    "crates/cmr-peer",
+    "crates/cmr-compressor",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+cargo = "warn"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"

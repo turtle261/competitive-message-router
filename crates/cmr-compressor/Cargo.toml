@@ -1,0 +1,10 @@
+[package]
+name = "cmr-compressor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cmr-core = { path = "../cmr-core" }
+infotheory = { git = "https://github.com/turtle261/infotheory", tag = "v1.0.0", version = "1.0.0", default-features = false }
+serde_json = "1.0.145"

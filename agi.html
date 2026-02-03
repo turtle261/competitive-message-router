@@ -1,0 +1,186 @@
+<html><head><title>AGI</title></head>
+<body>
+<h1 align=center>A Proposed Design for Distributed Artificial Intelligence</h1>
+<p align=center>By <a href=./>Matt Mahoney</a>, Dec. 6, 2007
+
+<p>Note: this proposal has been replaced by a <a href=agi2.html>newer version</a>.
+
+<p>This document describes a proposed design for an Internet-wide
+message posting and search service.  It implements artificial intelligence
+as a large collection of narrowly specialized experts and a decentralized
+infrastructure for getting queries and updates to the right experts.
+It is implemented as a peer to peer network, where a peer can be either
+a human or a machine.  Each peer has specialized knowledge on a narrow
+topic and knows other peers who know about related topics.
+Peers communicate in natural language text.
+
+<p>A distributed message posting service can be used as a search engine,
+but it makes no distinctions between queries and documents.  Messages posted
+to the service are usually permanent and cannot be deleted.
+When you post a query, the service returns related documents.
+Likewise, when you post a document, it returns related queries posted earlier,
+and forwards the document to the originators of those queries.
+The protocol does not specify what "related" means, but it could be as simple
+as matching terms, or might imply a higher level of intelligence.  Peers may be
+configured independently to implement any policy, but the network rewards
+peers for intelligence and cooperation.
+
+<h2>Protocol</h2>
+
+<p>Alice has a question about X.  Alice asks Bob, who doesn't know the
+answer, but knows that Charlie is an expert on X.  Bob says to Charlie,
+"Alice asked about X".  Charlie replies with the answer ("X=Y") to both
+Alice and Bob.  All three peers now know that X=Y, and also know that Charlie
+is an expert on X.  The conversation is:
+<pre>
+Alice -> Bob:          {From Alice at time T1: X?}
+Bob -> Charlie:        {From Bob at T2: From Alice at T1: X?}
+Charlie -> Alice, Bob: {From Charlie at T3: X=Y}
+</pre>
+
+<p>If Alice later has a question about X, or learns that X=Z, she can
+retrieve the stored message from Charlie, matching the term "X" and go straight
+to the expert.
+
+<p>A message has a header, body, and possibly attached files.  The
+header should contain the reply address of the originator and time sent,
+as well as the addresses and timestamps of any intermediate peers through
+which the message was routed.  The originator and first
+timestamp uniquely identifies the message.
+
+<p>A peer is not obligated to route incoming
+messages, but if it does so, it should append its reply address (such as
+a URL or email address) and the current time to the beginning of the header.
+The receiving peer should ignore messages where the closest sender's reply address
+cannot be authenticated, or where the timestamps are out of order.  It should
+delay or ignore messages where the most recent timestamp is in the future
+according to the receiver's clock.  A peer should discard messages that contain
+its own address (to break routing loops).  It should discard copies of messages
+that contain no new reply addresses in addition to those already seen on other
+copies.
+
+<h2>Distributed Search</h2>
+
+<p>Distributed search is not limited by the computing power of a centralized
+search engine, which limits the size of the index and cached copy of the
+Internet.  Nor is it limited by delays in updating the index.  When a
+document is posted, the index is updated immediately by routing the message
+to persistent queries and to related peers.  A peer could have
+a client interface to a human.  Thus, a query could initiate a conversation.
+
+<p>A peer may implement a search engine component in the vector space model
+by keeping a cache of messages.  When a peer receives a message, it stores
+the input and matches terms to terms in the cache, and forwards the message to
+peers whose reply address appears in those messages.  If no terms match, then
+the input is stored but not relayed.  This will cause peers to concentrate
+on narrow topics because recipients will tend to send back new messages with the
+same terms.
+
+<p>Peers may use any cache replacement policy they want.  The simplest policy
+is to discard the oldest messages first.  However, it may give priority
+to messages based on certain keywords, the reputation of the sender,
+or payment received, or the whims of the peer's administrator,
+or any other consideration.
+
+<p>A client can rank query responses by the number of copies received.
+Popular documents will be requested more often, or be given higher
+priority, resulting in more copies.
+
+<p>A peer is not obligated to use the vector space model.  A more intelligent
+or specialized peer might use a thesaurus to match related terms,
+or perform database lookups, or it might perform
+calculations, e.g. detect expressions like "17+5" and generate responses
+like "17+5=22" on the fly.
+
+<h2>Scalability</h2>
+
+<p>I analyzed a similar protocol in my
+<a href=http://cs.fit.edu/~mmahoney/thesis.html>thesis</a> in 1998.
+Roughly, the average routing distance grows at O(log n).  Storage
+is O(n log n) due to the growth of headers to store routes of this length.
+The network is robust because there are multiple copies of messages and
+multiple routes between nodes.  The network is self repairing because
+new links are always being added as old ones are discarded.
+
+<h2>Security</h2>
+
+<p>Malicious peers could send spam or false information,
+forge headers, send attached files containing viruses or trojans,
+or exploit security flaws in the peer to peer software.
+There may also be other attacks I haven't thought of.
+
+<h3>False information</h3>
+
+<p>If a query "X?" receives responses "X=Y" and "X=Z", which is to be
+believed?  Generally more peers should respond with true answers than
+false answers, so the true answer should be higher ranked.  The user
+may also consider the reputation of the sender in the header.
+
+<h3>Spam</h3>
+
+<p>Information has negative value because it occupies memory, which
+has positive value.  Peers should enforce fairness by prioritizing other peers
+by the ratio of outbound to inbound traffic, thus isolating spammers.
+
+<h3>Forgery</h3>
+
+<p>Malicious peers might forge headers for the purpose of redirecting
+responses or impersonating a peer with a good reputation.  Peers should
+not trust header content beyond the reputation of the least trusted
+peer in the chain.  Peers are responsible for authenticating the reply
+address of the immediate sender, perhaps by sending a reply to that
+address requesting a response.  Peers may also verify messages by going
+directly to the source.  If the reply is not consistent, it will know
+that the header was forged and lower the reputation of the sender.
+
+<h3>Attached files</h3>
+
+<p>Attached files provide a useful service, but
+might contain viruses or trojans.  I believe
+it is preferable to plan for attachments rather than have them encoded in message
+text in an ad-hoc manner to get around a limitation of the protocol.
+
+<h3>Software flaws</h3>
+
+<p>All network software is capable of being exploited if it contains
+security flaws, such as buffer overflow vulnerabilities or poorly planned
+features.  There is no good solution to this problem.  To minimize the
+risk, the protocol and software should be as simple as possible, the peer
+should run as a nonprivileged process, and there should be a variety of
+software sources, preferably open source.  The peer network should not be
+used for software updates because this introduces another mode of attack.
+
+<h2>Implementation</h2>
+
+<p>To achieve widespread use, the network must offer a useful service
+not available elsewhere.  Potentially the service offers a search
+space 1000 times larger than Google, the ability to post updates that
+are instantly searchable, to post persistent queries, to integrate
+intelligent services into the network, and to find and communicate
+with live humans.  There is still the initial hurdle that these
+services won't be available until it is widely deployed, and it won't
+be widely deployed if the software isn't initially useful.  Therefore,
+it is important for the initial versions to work with the existing
+Internet, such as directing queries to the currently existing
+centralized search engines.
+
+<p>The message passing protocol could theoretically run on top of most
+existing protocols, such as HTTP, SSH, email, or instant messenging.
+Peer to peer software is not well suited for most computers, which
+are primarily clients.  They have dynamic IP addresses, are behind
+firewalls, and have slow uplinks.  Many clients may have to connect to
+peers running on an external website.
+
+<h2>Conclusion</h2>
+
+<p>I believe that a message posting service with distributed search
+capability would appear to be intelligent.  It quickly answers questions,
+like ordinary search engines do, but would also be interactive through
+instantly searchable updates.  The natural language protocol allows for
+peers to grow to human level intelligence as hardware gets cheaper and
+more powerful.  Of course we won't really know until it is built.
+I believe it will be, in some form.  Intelligence requires vast
+computing power, so we should use the most obvious source, the Internet.
+
+<p>To be continued...
+

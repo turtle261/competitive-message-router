@@ -1,0 +1,41 @@
+local_address = "http://127.0.0.1:8080/"
+security_level = "strict"
+prefer_http_handshake = false
+
+[listen]
+
+[listen.http]
+bind = "0.0.0.0:8080"
+path = "/"
+
+# Optional HTTPS listener
+# [listen.https]
+# bind = "0.0.0.0:8443"
+# path = "/"
+# cert_path = "certs/server.crt"
+# key_path = "certs/server.key"
+
+[listen.udp]
+bind = "0.0.0.0:9000"
+service = "cmr"
+
+[compressor]
+command = "cmr-compressor"
+args = []
+max_frame_bytes = 8388608
+
+# Optional SMTP client transport (for mailto: destinations)
+# [smtp]
+# relay = "smtp.example.com"
+# port = 587
+# from = "cmr@example.com"
+# username = "cmr@example.com"
+# password_env = "CMR_SMTP_PASSWORD"
+
+[ssh]
+binary = "ssh"
+default_remote_command = "cmr-peer receive-stdin --config /etc/cmr-peer.toml --transport ssh"
+
+[[static_keys]]
+peer = "http://peer-a.example/cmr"
+hex_key = "666f6f626172313233"

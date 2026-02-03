@@ -1,0 +1,801 @@
+<html><head><title>A Proposed Design for
+Distributed Artificial General Intelligence</title></head>
+<body>
+<font face="Arial","Helvetica">
+<h1 align=center>A Proposed Design for<br>
+Distributed Artificial General Intelligence</h2>
+<p align=center>Version 2.2<br>
+By <a href=./>Matt Mahoney</a>, Oct. 13, 2008
+
+<h2>Abstract</h2>
+
+<p>This document describes a proposed design for a globally distributed
+artificial general intelligence (AGI)
+for the purpose of automating the world economy.
+The estimated value is on the order of US $1 quadrillion. The cost of a solution
+would be of the same order if we assume a million-fold
+decrease in the costs of computation, memory, and bandwidth,
+solutions to the natural language, speech, and vision
+problems, and an environment of pervasive public surveillance. The
+high cost implies decentralized ownership and a funding model
+that rewards intelligence and usefulness in a hostile environment
+where information has negative value and owners compete for
+attention, reputation, and resources.
+
+<p>The proposed solution is called <i>competitive message routing</i> (CMR).
+To a human user or a specialized intelligent server, CMR is a content-searchable
+message pool to which anyone may post. AGI is achieved by routing messages
+to the right specialists. CMR is implemented as a peer to peer network where
+incoming messages are cached, matched to stored messages, and each is
+forwarded to the sources of the other message. Economic, security,
+and long term safety issues are discussed. A specific protocol
+is proposed, defining a message format, sender authentication, and
+transport over existing internet protocols.
+
+<h2>1. Goals</h2>
+
+<p>The purpose of AGI is twofold: first to improve the efficiency
+of organizations of humans by facilitating communication and
+access to information, and second, to automate the economy with respect
+to those functions that require human labor.
+
+<p>With respect to communication, the goal is to make information
+easy to find and publish. To send a message, you simply speak or type it
+into your computer or phone to nobody in particular, and it goes to
+anyone who cares, human or machine. If your message is in the form of
+a question, then it goes to anyone who can or has already answered it. If it is in the
+form of a statement, it goes to anyone whose question (past or future)
+it answers. Sending a message may initiate a public conversation
+with others that share your interests. When enough narrowly intelligent experts
+are added to the network, you should not care (or may prefer)
+that your conversation be with machines rather than humans.
+
+<p>With respect to automating labor, the goal is to reduce costs. It is not
+simply to replace existing jobs with machines, e. g. replacing truck drivers
+and lawyers, resulting in massive unemployment. Rather, easy access
+to an immense global database and computing infrastructure should result
+in new ways of solving problems, for example, the way shopping on the internet
+has supplemented traditional markets and created new job opportunities
+for web designers. Although the trend is clear that we are better off with
+automation, the details are difficult to predict, so I will not attempt
+to do so. Fifty years ago we imagined a future where robots pumped gas
+and tourists went to Mars, not the other way around.
+
+<h2>2. Cost</h2>
+
+<p>The cost of AGI is estimated to be on the order of US $1 quadrillion.
+
+<p>First, we assume that
+<a href=http://en.wikipedia.org/wiki/Moore%27s_law>Moore's Law</a>
+will contine to halve the cost
+of computing power, storage, and network bandwidth every year or two
+for at least the next 30 years, as it has done for the last 50 years or so.
+
+<p>Second, we assume that there are no fundamental obstacles to solving
+hard AI problems such as language and vision, other than lack of computing
+power. In the worst case, these could be implemented using human brain sized
+neural networks, specifically, 10<sup>11</sup> neurons and 10<sup>15</sup>
+synapses modeled at 10 ms resolution. An equivalent artificial neural network
+would require about 10<sup>15</sup> bytes of memory and 10<sup>17</sup>
+operations per second. As of 2008 this would require about 20 doublings of Moore's law
+to make brain-sized computing power affordable to individuals.
+It is possible that more efficient solutions may be found sooner.
+In any case, we may ultimately neglect the cost of hardware.
+
+<p>Third, we assume that people will want AGI. It implies pervasive surveillance,
+since it will be the cheapest way for it to acquire the necessary
+knowledge. We imagine that a search for "where was Matt Mahoney
+last Saturday?" would produce a map, annotated with links to hundreds of
+videos recorded on public cameras indexed by face and license plate
+recognition software, and links to any conversations I made through
+computers or face to face within range of a public microphone. These conversations
+would be instantly indexed, summarized, and sent to anyone with an interest in what
+I said. At the same time, I would be notified of your query. We assume
+that people will want their conversations public because of the convenience,
+for example:
+<pre>
+  She: Hi dear. Could you pick up some Chinese on the way home?
+  He: OK, the usual?
+  Wok-in-the-box: Your order will be ready in 5 minutes.
+</pre>
+
+In building AGI, we can choose between spending more money to get
+it sooner vs. spending less by waiting until hardware costs drop. The
+optimal point is the value of the labor replaced divided by market interest rates.
+As of 2006, the value of labor worldwide
+was worth <a href=http://www.google.com/search?q=world+gdp>US $66 trillion</a>.
+If we assume an interest rate
+of 6%, then the value would be $1 quadrillion. However,
+this is a moving target. The world GDP is increasing at about
+5% annually. At this rate, it will be worth $4 quadrillion in 30 years.
+
+<p>As a best case scenario, we may assume that
+the major cost of AGI will be software and knowledge, which
+is not subject to Moore's Law. To make knowledge acquisition as cheap
+as possible, we will assume that the AGI understands language, speech,
+and images so it is not necessary to write code.
+We can train AGI on already published information
+plus surveillance of our normal activities
+rather than explicit instruction.
+It remains to estimate how much knowledge we need, how much is already
+available, and the rate that the remainder can be acquired.
+
+<p>In order to automate the
+economy, AGI must have knowledge equivalent to the world's population of
+about 10<sup>10</sup> human brains. According to recall tests performed by
+<a href=http://www.merkle.com/humanMemory.html>Landauer</a>, humans
+learn at a rate of 2 bits per second and have
+a long term memory capacity of about 10<sup>9</sup> bits.
+This is also about the amount of language processed since birth by
+an average adult, assuming 150 words per minute, several hours per day,
+at a rate of
+<a href=http://www.cs.fit.edu/~mmahoney/dissertation/entropy1.html>1
+bit per character</a> as originally estimated by Shannon.
+
+<p>This implies that AGI needs 10<sup>19</sup> bits of knowledge
+to automate the economy, except that people have shared knowledge.
+One of the advantages of machines over humans is that knowledge can
+be copied easily, eliminating the need to build millions of schools to
+train billions of agents. However, some fraction of knowledge is
+unique to each job and can't be copied. Organizations become more
+efficient when their members specialize. The fraction of shared knowledge
+is hard to estimate, but we can get some idea from the cost of replacing
+an employee, sometimes a year's salary. If we assume that 90% to 99% of
+human knowledge is shared, then AGI needs 10<sup>17</sup> to 10<sup>18</sup>
+bits of knowledge.
+
+<p>Currently, the internet has insufficient data to train AGI.
+A quick Google search for common English words ("the", "of", "a") shows that
+the accessible part of the internet is about 3 x 10<sup>10</sup> web
+pages as of 2008. If each page has a few kilobytes of text, then there is about
+10<sup>14</sup> bits of knowledge available after compression.
+But even if it were 10<sup>16</sup> bits, it would be far less than the amount needed.
+The rest still needs to be extracted from human brains.
+
+<p>We are fundamentally
+limited by the speed with which humans can communicate. Humans convey information
+at the same rate that they store it, about 2 bits per second.
+At current labor rates (US $5/hour worldwide), this implies a lower bound on cost
+of $100 trillion to $1 quadrillion as this information is gathered over several
+years from the world's population.
+However, this is a moving target. As we are developing language, vision,
+and surveillance capabilities to reduce knowledge acquistion costs,
+organizations are also becoming more efficient
+through increased specialization, with less duplication of knowledge and skills.
+In the worst case, an optimally efficient human economy with 10<sup>19</sup>
+bits could cost on the order of $10 quadrillion in today's dollars to automate.
+
+<h2>3. An AGI Design</h2>
+
+<p>I propose a design for AGI called <i>competitive message routing</i> (CMR).
+To a client, CMR looks like
+a pool of messages which can be searched by content.
+A client can either be a human user or a machine (an <i>expert</i>)
+providing some specialized service, such as a calculator, database,
+or narrow AI application. When a client posts a message
+(adds it to the pool), it goes to anyone who has previously
+posted a similar message, and those similar messages are returned
+to the client. AGI is achieved by attaching lots of
+experts and routing messages to the right experts.
+
+<p>We make no distinction between queries and documents. A message may
+be used to ask a question, answer a question, post information, or
+initiate a public, interactive
+conversation with someone who shares your expressed interest.
+Every message is tagged with the name of its creator and time of
+creation. If the information was obtained from elsewhere, then
+the original sources should be included. Messages cannot be
+deleted or modified once they are added to the pool. However, updates
+can be posted and the latest version can be identified by its timestamp.
+
+<h3>3.1. Competitive Message Routing</h3>
+
+<p>CMR is implemented on a peer to peer network, as described in my
+<a href=http://cs.fit.edu/~mmahoney/thesis.html>thesis</a>. A message
+occupies a point in an m-dimensional semantic space, for example, a
+<a href=http://en.wikipedia.org/wiki/Vector_space_model>vector space model</a>.
+Peers have a cache of messages, some of which originated from
+other peers. When a client creates a message X, the
+peers have the goal of routing X to the peers that hold messages close
+to it, and sending those responses back to the originator as well as any
+peers through which X was routed.
+
+<p>Example: suppose Alice wants to know what is the largest planet.
+She doesn't know or who might know, but knows Bob from the message M1
+he sent last week: "Hello". She asks Bob.
+Bob doesn't know, but guesses that Charlie is an
+expert on planets because he received the message
+M2 last month: "Mercury is the innermost planet".
+The conversation goes like this:
+<pre>
+  Alice -&gt; Bob: X = "What is the largest planet?"
+  Bob -&gt; Charlie: "Alice asked a minute ago: What is the largest planet?"
+  Charlie -&gt; Alice, Bob: M3 = "Dave said last year: Jupiter is the largest planet."
+</pre>
+
+<p align=center><img src=agi2.png><br>
+Fig. 1. Traversing messages in semantic space toward goal X.
+
+<p>The stored messages M1, M2, and M3 get progressively closer to X in semantic
+space, as shown in Fig. 1. Each peer knows only a subset of the messages
+in this space. The originator of the message serves as a link to other peers
+whose semantic regions overlaps. When no more progess can be made in approaching X,
+the last peer replies to all involved in routing X with the closest known match.
+
+<p>For a graph of n vertexes embedded in a semantic space of m dimensions,
+progress toward a target in space is possible in O(log n/log m) time
+when the average degree of the graph is at least 2m. For example, when m = 1,
+a binary tree will suffice. For a natural language semantic space,
+m is the size of the vocabulary, about 10<sup>5</sup>.
+
+<p>As explained in my thesis,
+the model is robust. Each update adds more direct links to improve response time
+to similar messages,
+and new links to the graph to replace failed peers and links.
+(For example, Alice now knows that Charlie and Dave both know about Jupiter).
+Each query results in more copies of the requested message, to help load balancing.
+This robustness compensates for differences in the semantic models of different
+peers. A client may also
+post a message to several peers to improve the expected number of responses.
+
+<h3>3.2. Routing Strategy</h3>
+
+<p>An organization is optimally efficient when there is no
+unnecessary duplication of knowledge among peers beyond what is
+needed for fault recovery. This is achieved by a market economy
+where information has negative value. Peers have an incentive
+to offload information to other peers and delete their own copy
+as long as it remains accessible.
+Peers can mutually benefit by trading messages if both parties can
+compress the received messages more tightly than the sent messages.
+
+<p>Trading results in peers storing groups of similar messages, clusters
+in semantic space. We define a distance between messages X and Y
+as D(X, Y) = K(Y|X) + K(X|Y) where K is
+<a href=http://en.wikipedia.org/wiki/Kolmogorov_complexity>Kolmogorov
+complexity</a>, i.e. K(Y|X) = K(XY) - K(X) is the length
+of the shortest program that outputs Y given X as input.
+K is not computable in general, so for practical purposes we substitute
+a compression difference measure, C(X, Y) = C(Y|X) + C(X|Y)
+where C(Y|X) = C(XY) - C(X) and C(XY) means the compressed size
+of X concatenated with Y. The better the compression algorithm, the
+more closely C approximates K.
+
+<p>D is compatible with Euclidean distance in the vector space model because
+it has the properites of a distance measure.
+It has the following properties for distinct messages X, Y, and Z:
+<ul>
+<li>D(X, X) = 0.
+<li>D(X, Y) &gt; 0.
+<li>D(X, Y) = D(Y, X).
+<li>D(X, Y) + D(Y, Z) &ge; D(X, Z).
+</ul>
+
+<p>We can now describe a routing policy. A peer
+has a cache of messages received from other peers. We assume that messages
+cluster within peers, meaning D(X, Y) is likely to be smaller if
+X and Y are stored on the same peer than on different peers.
+Suppose Alice receives message X and must decide who to route it to.
+Alice computes D<sub>1</sub> = D(X, Y<sub>1</sub>), 
+D<sub>2</sub> = D(X, Y<sub>2</sub>), ...
+where Y<sub>i</sub> is the concatenation of all messages received from
+peer i. Then Alice routes X to the i that minimizes D<sub>i</sub>.
+This is Alice's best estimate of the peer that can compress X the smallest.
+
+<p>Let's say the best match to X is i = Bob.
+If Bob is one of the senders of X, then Alice should keep X rather
+than send it back. To compensate for her storage cost, Alice should send a different
+message back to Bob, one that takes a lot of space in Alice's cache
+but that Bob can easily compress. Then for each message Z<sub>j</sub>
+in Alice's cache where Bob is not one of the senders, Alice computes D<sub>j</sub>
+= D(Z<sub>j</sub>, Z<sub>i=1..n,i&ne;j</sub>) - D(X, Z<sub>j</sub>)
+and reply with Z<sub>j</sub> that maximizes D<sub>j</sub>.
+The term Z<sub>i=1..n,i&ne;j</sub> means the concatenation
+of all of the messages in the cache except Z<sub>j</sub>.
+
+<p>X is a <i>guess</i> about what Bob knows. Alice can concatenate
+other messages from Bob to X in computing D(X, Z<sub>j</sub>)
+
+<p>When Alice sends or forwards a message, she does not delete it right
+away. She keeps it in the cache until she needs space. Peers are
+free to choose their own deletion policies. This requires some
+intelligence. Otherwise peers that provide unlimited free space
+can be exploited by non-cooperating peers.
+
+<h3>3.3. Flow Control</h3>
+
+<p>Peers may choose their routing strategies independently using
+different compression algorithms. This introduces an uncertainty
+as to which message matches the closest. We compensate by routing
+messages to more than one peer when all of them are fairly close.
+In the previous example we might have additional messages such as:
+
+<pre>
+  Bob -&gt; Alice: "Charlie said last month: Mercury is the innermost planet"
+  Charlie -&gt; Dave: "Bob said 1 minutes ago that Alice asked 2 minutes ago: What is the largest planet?"
+  Dave -&gt; Alice, Bob, Charlie: "Jupiter is still the largest planet"
+</pre>
+
+However, a ratio of output to input greater than 1
+could lead to an exponential explosion of messages.
+To compensate, peers should delete duplicate messages and establish
+a distance threshold or other criteria such that if there is no good match then
+the message is discarded. In general, there is no clean solution.
+A good routing strategy requires intelligence and an economic
+policy that rewards intelligence as discussed in section 4.
+
+<h2>4. Security and Economic Considerations</h2>
+
+<p>AGI is too expensive for any one person or group to own
+or be able to control any significant
+part of it. The system must be decentralized. There is no central
+authority to enforce the peer to peer protocol. Messages may not conform
+to the protocol and may be hostile. Peers will need to deal with
+false information, spam, scams, flooding attacks, forgery, attached viruses
+and worms, and malformed or malicious messages that attempt to exploit software
+flaws such as buffer overflows to crash the recipient or gain unauthorized
+access.
+
+<p>In order for AGI to be built, there must be an economic incentive
+for users to add well-behaved peers to the system. They must have
+an incentive to make CPU, memory, and bandwidth (resources) and high
+quality information available. They must have an incentive to prevent
+their peers from being exploited by forwarding malicious traffic.
+
+<p>The economic model of CMR is based on information having negative
+value on average.  People are willing to pay to
+have their messages received by others. 
+Peers compete for attention, reputation,
+and resources in a hostile environment. This requires that peers rank
+others by the quality of information received from them and to reject
+messages from peers with poor reputations. Distinguishing between high and
+low quality information requires intelligence. It requires work by
+users, either to rate messages to adjust the reputation of senders,
+or to specify complex filtering policies. This work may be a significant
+fraction of the total cost of AGI, perhaps the single greatest cost.
+
+<p>CMR supports an advertising model. However, peers must target ads
+carefully to those who want them,
+or risk being blocked or having to pay other peers to forward
+their ads. Users need to supply useful services and information in
+a competitive market in order to make a profit. This is the other
+major cost of AGI.
+
+<p>Reputation management requires that peers reliably identify
+their sources. CMR allows senders to sign messages independently
+of any underlying protocol that might also provide this service
+(such as HTTPS). A CMR digital signature is based on a
+secret key shared by the sender and receiver. If Bob receives
+a signed message from Alice, then Bob can verify that the message
+is from the same source that claimed to be Alice in other signed
+messages, and that the message was not altered or forged
+by anyone not knowing the key. Keys are not reused between any
+other pair of peers to minimize the damage if a key is compromised.
+
+<p>When Alice sends a message to Bob for the first time, they
+may establish a key using one time public RSA
+key pairs, by Diffie-Hellman (DH) key exchange, or by other methods outside
+the CMR protocol. However there is no foolproof method of key exchange.
+RSA and DH are susceptible to man in the middle attacks if the
+attacker is able to intercept messages from both peers.
+
+<p>Signatures are used only between immediate neighbors. If Alice
+sends a message to Bob, which is forwarded to Charlie, then Charlie
+can only verify Bob's signature and must trust that Bob verified
+Alice. If in doubt, Charlie should ask Alice directly. If Charlie
+determines that Bob's message was bogus, then Charlie should
+downgrade only Bob's reputation, since Bob's claim that it is from
+Alice cannot be trusted.
+
+<h2>5. Long Term Safety of AGI</h2>
+
+<p>AGI will obviously have a huge impact on society. In particular
+<a href=http://mindstalk.net/vinge/vinge-sing.html>Vernor Vinge</a> has raised
+the possibility of runaway AI resulting in a 
+<a href=http://en.wikipedia.org/wiki/Technological_singularity>technological
+singularity</a>. Organizations such as
+<a href=http://singinst.org/>SIAI</a> and the
+<a href=http://lifeboat.com/ex/main>Lifeboat Foundation</a> were formed
+to address the existential threats of an intelligence explosion of
+unfriendly AI. I will address these concerns with respect to CMR.
+
+<h3>5.1. Recursive Self Improvement</h3>
+
+<p>One possibility is that a smarter than human AI could produce
+even smarter AI in a process of recursive self improvement (RSI).
+In this scenario, the first program to achieve superhuman
+intelligence would be the last invention that humans would need
+to create. One of the goals of SIAI has been to develop that seed AI
+and ensure that it remains friendly through successive generations.
+
+<p>I do not believe this approach is viable.
+Currently there are no physical, mathematical, or software models
+of RSI for any reasonable definition of what "intelligence" means.
+I showed <a href=rsi.pdf>(PDF)</a> <a href=rsi.html> (HTML)</a>
+that RSI is possible, but only
+in a trivial sense. The maximum rate of improvement is O(log n),
+no faster than a counter. Intelligence requires information, and
+information can't come from nowhere.
+
+<p>An often cited example of RSI is the growth of human civilization.
+That is not the case. Economic, cultural, and technological growth is a form
+of self organization, not self improvement. Individual humans
+can do much more today than 1000 years ago, but our brains are no
+different. Without language, modern humans probably would not think to produce
+spears out of sticks and rocks, much less produce computers.
+
+<p>In the short term,
+CMR produces AGI from lots of machines that individually have low
+intelligence and only do what they are programmed to do by humans.
+These machines have no goals and cannot improve themselves. However,
+CMR rewards intelligence, where intelligence is defined as successful
+ability to acquire computing resources. The absence of RSI only means that improvement
+is an evolutionary process in which programs do not set
+the criteria for testing intelligence in their copies.
+
+<h3>5.2. Uploading</h3>
+
+<p>Humans, like all animals, have evolved a fear of death (actually,
+a fear of the many things that can kill us), because it increases
+the expected number of children. Some people may wish to create programs
+that simulate their brains and have them turned on after they die.
+Such a program would have the same memories, skills, and simulated
+emotions as the original and be indistinguishable to friends and relatives.
+
+<p>We call such a program an <i>upload</i>. It is not necessary to
+develop any new technology (such as brain scanning) beyond what
+we have already assumed: a million-fold drop in computing costs
+and extensive surveillance to extract 10<sup>9</sup> bits of knowledge
+from every human. Any memory differences between the original and copy could
+be filled in with plausible details, and the copy would not appear to notice.
+We might assume other technology is developed later, such as robotic embodiment.
+
+<p>Whether an upload actually transfers the original's consciousness
+is an irrelevant, philosophical question. What is important is that
+to others it will <i>appear</i> that the original has been brought
+back to life, making it a popular option. As I described CMR,
+it is friendly because humans own computing resources and the machines
+themselves have no rights. The danger is that people
+will want their uploads to have the same rights as they had when
+they were alive, including ownership of resources. This will result
+in humans competing with machines of their own creation rather than
+just each other. It also raises difficult legal issues because uploads
+could reproduce themselves rapidly, modify their own software,
+and there is no clear legal
+or technical distinction between uploads and other types of programs.
+
+<h3>5.3. Intelligent Worms</h3>
+
+<p>CMR is an environment where peers compete for resources.
+These could be stolen by trickery or exploiting software flaws. Currently,
+internet worms exploit flaws discovered by humans to make copies
+of themselves. Intelligent worms with language models that include
+programming skills are much more dangerous for 4 reasons.
+<ol>
+<li>Worms could analyze source code and executable code to discover
+thousands of security vulnerabilities for which no patches have been
+developed.
+<li>Worms could use language to trick humans into installing them.
+("Please enter your administrative password to install 79 updates").
+<li>Worms could modify their source code and evolve. Evolution
+favors worms that reproduce successfully and evade detection.
+<li>Once your computer is infected, it could intelligently monitor
+your activities. ("No viruses detected").
+</ol>
+It is possible that every computer could be quickly infected and we
+would not know.
+
+<h3>5.4. Redefining Humanity</h3>
+
+<p>Whether or not we have RSI, uploading, or intelligent worms, at
+some point the total knowledge and computation implemented in machines
+will exceed that of human brains. Beyond that, it would matter little
+to the global brain whether humans were extinct or not. It not, then humans would
+at least be unaware of the intelligence that controlled the world around them,
+just as dogs are unaware of the human intelligence or goals of their breeders.
+
+<p>We should hope that the collective intelligence would be benevolant to humans,
+but what does that mean? Humans want happiness, but happiness is just
+a reward signal controlled by a complex function that evolved to increase
+reproductive fitness. Expressed as a reinforcement learner, the human brain
+implements an optimization process whose goal is to maximize the
+scalar utility U(x) over the 2<sup>10<sup>9</sup></sup> to 2<sup>10<sup>15</sup></sup>
+possible mental states, x. We experience happiness when we go from a mental
+state x<sub>1</sub> to x<sub>2</sub> where U(x<sub>1</sub>) &lt; U(x<sub>2</sub>).
+At some point there is a maximum where any thought or sensory awareness
+would be unpleasant because it would result in a different mental state.
+
+<p>A possible way out is to augment the brain with additional memory so
+that we never run out of mental states. Then what do we become? At some point
+the original brain becomes such a tiny fraction that we could discard it
+with little effect. As a computer, we could reprogram our memories and goals.
+Instead of defining happiness as getting what we want, we could reprogram ourselves
+to want what we have. But in an environment where programs compete for
+atoms and energy, such systems would not be viable. Evolution favors programs
+that fear death and die, that can't get everything they want, and can't change
+what they want.
+
+<p><hr>
+
+<h1 align=center>Appendix A<br>
+CMR Protocol Specification</h1>
+
+<h2>A1. Overview</h2>
+
+<p>This section describes a proposed implementation of
+competitive message routing (CMR) protocol.
+CMR is a distributed message posting and search service.
+When a client posts a message, it has the effect of adding the
+message to the pool and retrieving related messages that are either
+already in the pool or that are posted later by other clients.
+There is no provision to delete or modify messages, once posted.
+
+<p>A CMR network is composed of <i>peers</i>. Any peer may send
+messages to any other peer. Every peer should have a globally unique
+address for receiving messages.
+
+<p>A peer is either a <i>router</i> or a <i>client</i>.
+A client may either
+be an interface to a human user or to a server. CMR protocol
+specifies only the behavior of routers. Clients do not have
+to follow any rules. Thus, peers cannot tell if incoming
+messages are from routers or clients because it is possible
+for a client to emulate a router.
+
+<p>A router has a store of messages called a <i>cache</i>.
+The cache contains previously received messages. A router
+cannot create new messages. Only a client can do that.
+
+<h2>A2. Message Format</h2>
+
+<p>A CMR message is a string of 8-bit bytes.
+A message consists of a signature, a routing header,
+and a message body.
+
+<p>A signature consists of a line of text ending with a
+carriage return (CR, ASCII 13) and a linefeed (LF, ASCII 10).
+The first character of the signature is a version number,
+either 0 (ASCII 48) or 1 (ASCII 49), followed by a hash string.
+If the version number is 0 then the hash string is empty
+and the message is said to be <i>unsigned</i>. If it is
+1, then the hash string is the
+<a href=http://en.wikipedia.org/wiki/SHA>SHA-256</a> hash
+of a secret key, k<sub>ab</sub> concatenated with the routing
+header and message body. The hash is written as 64 lower case
+hexadecimal digits. k<sub>ab</sub> should be known only to
+the sender whose address appears in the first line of the
+routing header and the receiver. k<sub>ab</sub> may be
+of any length. In computing the hash, no bytes are placed
+after the key before the routing header.
+
+<p>A routing header consists of one or more message IDs.
+A message ID is a line consisting of a timestamp, a space character
+(ASCII 32), a server address and a CR LF to terminate the line.
+The message ID means that the message
+was sent at the indicated time by the peer with the
+given address. The message IDs are ordered from newest to oldest.
+Thus, the last line of the header identifies the client
+that created the message and the time it was created.
+The last line of the header is followed by a blank line
+(an additional CR LF).
+
+<p>A message ID uniquely identifies a message.
+No two messages that contain matching IDs
+anywhere in their routing headers should differ anywhere
+in the remainder of the header or in the body.
+
+<p>A timestamp has the format <tt>YYYY/MM/DD HH:MM:SS[.S*]</tt>
+(year, month, day, hour, minute, seconds, optional fractional seconds)
+in the range <tt>0000/01/01 00:00:00 to 9999/12/31 23:59:59.999</tt>... .
+Times are universal times (UT, formerly GMT). A decimal point after the
+seconds is optional. If it appears, it may be followed by any number
+of decimals. A timestamp must represent a valid time, not in the
+future, and earlier than the timestamp on the line above it, if any.
+
+<p>An address is an internet server address. It has the form of a URL
+if the underlying transport protocol supports it. Otherwise it is
+any string not containing the CR or LF characters. No address
+should appear more than once in a header. The recipient's address should
+not appear at all.
+
+<p>The message body consists of a length, n, written as a decimal
+number followed by CR LF, then n bytes (ASCII 0 through 255).
+Normally the body will contain human understandable data such as
+ASCII or UTF-8 encoded text, or suitably encoded audio, images, or video
+in common formats.
+However, there is no restriction on content. For example:
+
+<pre><tt>
+101c1ad32d6fe646a56edba43bd342ee11e45ba188c59aeec91a5590a0ea114d5
+2008/09/01 00:00:53.42 http://alice.com/cmr
+2008/09/01 00:00:53 udp://192.168.0.102:53/dns-tunnel
+2008/08/31 23:59:01.0955 https://www.charlie.com/messages.pl
+
+14
+Hello World!
+</tt></pre>
+
+<p>In this example, k<sub>ab</sub> is the 3 byte string "foo",
+known only to the peer with address
+http://alice.com/cmr and the message recipient.
+The message was created by the client whose address is
+https://www.charlie.com/messages.pl.
+
+<h2>A3. Router Behavior</h2>
+
+<p>When a router receives a message, it should reject (ignore
+and discard) any message that does not conform to the format
+described in the last section. It should reject any message
+with an ID that matches an ID of another message already in the cache.
+If the message is signed, then
+it should compute the signature and reject it if it does not match.
+It may also reject a message for any reason, for example, if
+the sender has a low reputation, or the content is recognized
+as spam or malicious, or if it cannot keep up with input. CMR does
+not require any policy.
+
+<p>If a message X is accepted, then it should be matched to
+zero or more
+messages in the cache and added to the cache. For each message
+Y matched to X, it should forward X to zero or more addresses
+that appear in the header of Y, and forward Y to zero or more
+addresses that appear in the header of X.
+
+<p>Router Alice forwards message X to peer Bob as follows:
+<ol>
+<li>Alice removes the signature line from X.
+<li>Alice adds X to her cache.
+<li>Alice assigns X := T | " " | Alice | CR | LF | X,
+where T is the current time, " " is a space, and | means string concatenation.
+Alice's clock should be of sufficient resolution that each forwarded
+message has a different value of T.
+<li>If Alice knows the shared secret key K<sub>ab</sub>
+with Bob, then Alice assigns X :=  "1" | SHA-256(k<sub>ab</sub> | X) | CR | LF | X.
+Otherwise Alice assigns X := "0" | CR | LF | X.
+<li>Alice sends X to Bob.
+</ol>
+
+<p>CMR does not specify a cache deletion policy. A router may remove
+messages from its cache at any time.
+
+<h2>A4. Transport</h2>
+
+<p>CMR is a super-application layer protocol. It may be sent over
+existing internet protocols such as HTTP or HTTPS or
+in the body of an email message. In general, a peer implements
+a single server protocol such as HTTP (appearing as a web server)
+and multiple client protocols such as HTTP (appearing as a web browser),
+and SMTP (to send email). The following describe the protocol
+for Alice to send a message to Bob:
+
+<h3>A4.1. SMTP</h3>
+
+<p>The recipient has a server address of the form <tt>mailto:<i>email-address</i></tt>
+such as <tt>mailto:bob@bob.com</tt>.
+Alice sends an email message to Bob. The body of the email message
+may be either a CMR message or a MIME encoded file attachment
+containing a CMR message.
+The subject line is irrelevant. The recommended subject is "cmr".
+
+<h3>A4.2. HTTP</h3>
+
+<p>The recipient has a server address in the form of a URL beginning
+with <tt>http://</tt> such as <tt>http://bob.com/cgi-bin/cmr.pl</tt>.
+Messages are sent as plain text files
+using file upload protocol as described in
+<a href=http://www.ietf.org/rfc/rfc1867.txt>RFC 1867</a>.
+
+<h3>A4.3. HTTPS</h3>
+
+<p>The protocol for HTTPS is the same as for HTTP.
+HTTPS also encrypts the message and provides for a secondary means
+of authentication.
+
+<h3>A4.4. UDP</h3>
+
+<p>UDP represents a worst case scenario because a message is
+contained in a single packet with no assurance
+that the source IP address is correct. The server
+address has the form <tt>udp://IP-address:port/string</tt> (not a
+standard URL), such as in the previous example. The string is
+used to identify which local CMR server listening on the port
+should receive the message. A message should fit in the payload
+of a single packet (up to about 64 KB).
+
+<h3>A4.5. HTTP Handshake</h3>
+
+<p>Handshake protocols are appropriate when the sender can reliably
+send a message to a receiver but the receiver cannot verify the
+sender's address. This model is usually assumed for email and HTTP
+requests. We assume that Alice and Bob both have HTTP server
+addresses, say, http://alice.com/ and http://bob.com/, and that
+they do not share a key. The exchange is:
+<ol>
+<li>Alice sends an HTTP GET request of the form
+ <i>receiver?request=sender&amp;key=secret</i>, for example<br>
+ <tt>http://bob.com/?request=http://alice.com/&amp;key=foo</tt>
+<li>Bob replies with a blank web page and closes the connection.
+<li>Bob sends an HTTP GET request to Alice of the form
+ <i>sender?reply=secret</i>, for example<br>
+ <tt>http://alice.com/?reply=foo</tt>
+<li>Alice replies to the request with a web page of <tt>Content-Type:
+ text/plain</tt> containing the unsigned message.
+<li>Alice and Bob discard the key. They use a new key for each message.
+</ol>
+
+<h2>A5. Key Exchange</h2>
+
+<p>When Alice sends a message to Bob for the first time and they do
+not share a secret key, a key may be established in a number of ways
+that are defined outside the CMR protocol.
+A key is unique to each pair of peers.
+
+<h3>A5.1 RSA</h3>
+
+<p>Alice generates a one time 
+<a href=http://en.wikipedia.org/wiki/RSA>RSA</a> key and sends a message
+to Bob with her public key. Bob replies by
+choosing a random key, encrypting it with her public key and sending
+it to Alice. If no key has been established, then both messages are unsigned.
+Otherwise, both messages are signed with the old keys and the new key
+takes effect for both Alice and Bob on the next message.
+
+<p>The protocol is as follows. Alice chooses two large prime numbers
+p and q, a public exponent e, and a private exponent d such that
+ed = 1 (mod lcm(p-1,q-1)), and computes n = pq. Alice sends a
+message to Bob with the following in the body:
+<pre><tt>
+  RSA key exchange request=n,e.
+</tt></pre>
+where all numbers are written in lower case hexadecimal. Bob then chooses
+a secret key k, computes c = k<sup>e</sup> (mod n) and replies to Alice:
+<pre><tt>
+  RSA key exchange reply=c.
+</tt></pre>
+Alice then computes key k = c<sup>d</sup> (mod n) and discards p, q, n, and d.
+Alice and Bob remove the two messages from their caches.
+
+<h3>A5.2. Diffie-Hellman</h3>
+
+<p>In <a href=http://en.wikipedia.org/wiki/Diffie-Hellman>Diffie-Hellman
+key exchange</a>,
+Alice chooses a secret number, a, a large prime number p, and
+a primitive root g of p. Alice computes A = g<sup>a</sup> (mod p)
+and sends a message to Bob of the form:
+<pre><tt>
+  DH key exchange request=g,p,A.
+</tt></pre>
+where all numbers are written in lower case hexadecimal.
+Bob chooses a secret number, b, computes B = g<sup>b</sup> (mod p)
+and replies to Alice:
+<pre><tt>
+  DH key exchange reply=B.
+</tt></pre>
+Alice and Bob then agree to use key k = B<sup>a</sup> (mod p)
+= A<sup>b</sup> (mod p), computed by Alice and Bob respectively.
+
+<p>As with RSA, messages are either unsigned or signed with
+old keys.
+
+<h3>A5.3. Secure Channels</h3>
+
+<p>If CMR is implemented on top of a secure protocol such as
+HTTPS or SSH, then the key may be chosen by Alice and
+sent directly in a single message to Bob:
+<pre><tt>
+  Clear key exchange=k.
+</tt></pre>
+The key is written in lower case hexadecimal and is converted
+into bytes (two digits per byte) when computing authentication
+strings. For example, if the key is "foo", then the message is:
+<pre><tt>
+  Clear key exchange=666f6f.
+</tt></pre>
+(In practice, a longer key would be used).
+
+<h2>Notes</h2>
+
+<p>This documentation is a revision of my
+<a href=agi.html>original proposal</a> dated Dec. 6, 2007.
+
+</body></html>
