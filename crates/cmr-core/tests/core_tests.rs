@@ -32,9 +32,11 @@ impl StubOracle {
 }
 
 impl CompressionOracle for StubOracle {
-    fn ncd_sym(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
+    fn ncd_sym(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
         if self.fail_ncd {
             Err(CompressionError::Failed("ncd failed".to_owned()))
+        } else if left == right {
+            Ok(0.0)
         } else {
             Ok(self.ncd)
         }
@@ -50,13 +52,16 @@ impl CompressionOracle for StubOracle {
 
     fn batch_ncd_sym(
         &self,
-        _target: &[u8],
+        target: &[u8],
         candidates: &[Vec<u8>],
     ) -> Result<Vec<f64>, CompressionError> {
         if self.fail_ncd {
             Err(CompressionError::Failed("ncd failed".to_owned()))
         } else {
-            Ok(vec![self.ncd; candidates.len()])
+            candidates
+                .iter()
+                .map(|candidate| self.ncd_sym(target, candidate))
+                .collect()
         }
     }
 }
@@ -401,45 +406,54 @@ fn router_rejects_weak_rsa_and_dh_request_parameters() {
 }
 
 #[test]
-fn router_uses_near_duplicate_policy_to_collapse_redundant_matches() {
+fn router_routes_compensatory_message_when_best_peer_already_sent_x() {
     let mut policy = permissive_policy();
-    policy.spam.max_match_distance = 0.9;
-    policy.spam.near_duplicate_distance = 0.2;
-    policy.throughput.max_match_candidates = 16;
-    let mut router = Router::new("http://local".to_owned(), policy, StubOracle::ok(0.9, 0.05));
+    policy.spam.max_match_distance = 0.5;
+    let mut router = Router::new("http://local".to_owned(), policy, StubOracle::ok(0.9, 0.8));
+    router.set_shared_key("http://bob", b"bob-key".to_vec());
 
-    let seed_a = message_with_sender(
-        "http://sink-a",
-        b"same body for matching",
-        None,
-        "2029/12/31 23:59:59",
-    );
-    let seed_b = message_with_sender(
-        "http://sink-b",
-        b"same body for matching",
+    let seed_bob = message_with_sender("http://bob", b"topic bob", None, "2029/12/31 23:59:59");
+    let seed_charlie = message_with_sender(
+        "http://charlie",
+        b"charlie payload",
         None,
         "2029/12/31 23:59:58",
     );
     assert!(
         router
-            .process_incoming(&seed_a, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .process_incoming(&seed_bob, TransportKind::Http, ts("2030/01/01 00:00:10"))
             .accepted
     );
     assert!(
         router
-            .process_incoming(&seed_b, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .process_incoming(
+                &seed_charlie,
+                TransportKind::Http,
+                ts("2030/01/01 00:00:10")
+            )
             .accepted
     );
 
-    let incoming = message_with_sender(
-        "http://origin",
-        b"same body for matching",
-        None,
-        "2029/12/31 23:59:57",
+    let incoming_from_bob =
+        message_with_sender("http://bob", b"topic bob", None, "2029/12/31 23:59:57");
+    let out = router.process_incoming(
+        &incoming_from_bob,
+        TransportKind::Http,
+        ts("2030/01/01 00:00:10"),
     );
-    let out = router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
     assert!(out.accepted);
     assert_eq!(out.matched_count, 1);
+    assert_eq!(out.forwards.len(), 1);
+    let compensatory = &out.forwards[0];
+    assert_eq!(compensatory.destination, "http://bob");
+    assert_eq!(compensatory.reason, ForwardReason::CompensatoryReply);
+
+    let parsed = parse_message(
+        &compensatory.message_bytes,
+        &ParseContext::secure(ts("2030/01/01 00:00:11"), Some("http://bob")),
+    )
+    .expect("parse compensatory");
+    assert_eq!(parsed.body, b"charlie payload");
 }
 
 #[test]
@@ -605,8 +619,7 @@ fn router_matching_forwards_and_resigns_for_known_destination() {
         second
             .forwards
             .iter()
-            .any(|f| f.reason == ForwardReason::IncomingToMatchedHeader
-                && f.destination == "http://sink")
+            .any(|f| f.reason == ForwardReason::BestPeerRoute && f.destination == "http://sink")
     );
 
     let signed_forward = second
