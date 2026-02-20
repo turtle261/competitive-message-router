@@ -155,6 +155,11 @@ jobs:
     name: ${{ matrix.name }}
     needs: lint-doc
     runs-on: ${{ matrix.runs_on }}
+    env:
+      # Avoid inheriting workspace-local target-cpu overrides from .cargo/config.toml
+      # when building fixed CI targets (notably aarch64-apple-darwin + ring).
+      CARGO_BUILD_RUSTFLAGS: ""
+      RUSTFLAGS: ""
     strategy:
       fail-fast: false
       matrix:
