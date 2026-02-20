@@ -1,4 +1,4 @@
-//! Router core: validation, security policy, cache matching, and forwarding.
+//! Router core: validation, security policy, and spec-driven forwarding.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -52,14 +52,7 @@ pub trait CompressionOracle: Send + Sync {
 struct CacheEntry {
     key: String,
     message: CmrMessage,
-    body_tokens: Vec<String>,
     encoded_size: usize,
-}
-
-#[derive(Clone, Debug)]
-struct MatchedMessage {
-    message: CmrMessage,
-    distance: f64,
 }
 
 #[derive(Debug)]
@@ -67,7 +60,6 @@ struct MessageCache {
     entries: HashMap<String, CacheEntry>,
     order: VecDeque<String>,
     origin_address_counts: HashMap<String, HashMap<String, usize>>,
-    token_index: HashMap<String, HashSet<String>>,
     total_bytes: usize,
     max_messages: usize,
     max_bytes: usize,
@@ -79,7 +71,6 @@ impl MessageCache {
             entries: HashMap::new(),
             order: VecDeque::new(),
             origin_address_counts: HashMap::new(),
-            token_index: HashMap::new(),
             total_bytes: 0,
             max_messages,
             max_bytes,
@@ -105,22 +96,14 @@ impl MessageCache {
             return;
         }
         let encoded_size = message.encoded_len();
-        let body_tokens = tokenize_for_index(&message.body);
         let entry = CacheEntry {
             key: key.clone(),
             message,
-            body_tokens,
             encoded_size,
         };
         self.total_bytes = self.total_bytes.saturating_add(encoded_size);
         self.order.push_back(key.clone());
         self.add_origin_addresses(&entry.message);
-        for token in &entry.body_tokens {
-            self.token_index
-                .entry(token.clone())
-                .or_default()
-                .insert(key.clone());
-        }
         self.entries.insert(key, entry);
         self.evict_as_needed();
     }
@@ -135,56 +118,8 @@ impl MessageCache {
             };
             self.total_bytes = self.total_bytes.saturating_sub(entry.encoded_size);
             self.remove_origin_addresses(&entry.message);
-            for token in &entry.body_tokens {
-                if let Some(set) = self.token_index.get_mut(token) {
-                    set.remove(&entry.key);
-                    if set.is_empty() {
-                        self.token_index.remove(token);
-                    }
-                }
-            }
+            debug_assert_eq!(entry.key, key);
         }
-    }
-
-    fn candidate_keys(&self, body: &[u8], max_candidates: usize) -> Vec<String> {
-        if self.entries.is_empty() || max_candidates == 0 {
-            return Vec::new();
-        }
-        let tokens = tokenize_for_index(body);
-        if tokens.is_empty() {
-            return self
-                .order
-                .iter()
-                .rev()
-                .take(max_candidates)
-                .cloned()
-                .collect();
-        }
-        let mut score = HashMap::<String, u32>::new();
-        for token in tokens {
-            let Some(keys) = self.token_index.get(&token) else {
-                continue;
-            };
-            for key in keys.iter().take(4096) {
-                *score.entry(key.clone()).or_default() += 1;
-            }
-        }
-        if score.is_empty() {
-            return self
-                .order
-                .iter()
-                .rev()
-                .take(max_candidates)
-                .cloned()
-                .collect();
-        }
-        let mut ranked: Vec<(String, u32)> = score.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
-        ranked
-            .into_iter()
-            .take(max_candidates)
-            .map(|(k, _)| k)
-            .collect()
     }
 
     fn add_origin_addresses(&mut self, message: &CmrMessage) {
@@ -324,12 +259,29 @@ const MIN_DH_MODULUS_BITS: u64 = 2048;
 /// Forward reason.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ForwardReason {
-    /// Matched incoming -> cached forward.
-    IncomingToMatchedHeader,
-    /// Matched cached -> incoming header forward.
-    MatchedToIncomingHeader,
+    /// Forwarded incoming message to best peer by D(X, Yi).
+    BestPeerRoute,
+    /// Compensatory response chosen when best peer already sent X.
+    CompensatoryReply,
     /// Key-exchange protocol reply.
     KeyExchangeReply,
+}
+
+#[derive(Clone, Debug)]
+enum RouteSelection {
+    ForwardIncomingToPeer {
+        destination: String,
+    },
+    SendCompensatoryToPeer {
+        destination: String,
+        message: CmrMessage,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct RoutingDecision {
+    matched_count: usize,
+    selection: Option<RouteSelection>,
 }
 
 /// Prepared outbound action.
@@ -600,20 +552,19 @@ impl<O: CompressionOracle> Router<O> {
             return self.drop_for_peer(&parsed, ProcessError::IntrinsicDependenceTooLow, -1.5);
         }
 
-        let matched = match self.match_cached_messages(&parsed) {
-            Ok(m) => m,
+        let routing = match self.select_routing_decision(&parsed) {
+            Ok(decision) => decision,
             Err(err) => return self.drop_for_peer(&parsed, err, -0.5),
         };
         let mut outcome = ProcessOutcome::accepted(parsed.clone());
         outcome.intrinsic_dependence = Some(id_score);
-        outcome.matched_count = matched.len();
+        outcome.matched_count = routing.matched_count;
 
         self.cache.insert(parsed.clone());
         self.record_peer_inbound(&sender, raw_message.len());
         self.adjust_peer_reputation(&sender, 0.4);
 
-        let forwards = self.build_forwards(&parsed, &matched, &now);
-        let mut limited = forwards;
+        let mut limited = self.build_routing_forwards(&parsed, routing, &now);
         limited.truncate(self.policy.throughput.max_forward_actions);
         for action in &limited {
             self.record_peer_outbound(&action.destination, action.message_bytes.len());
@@ -847,110 +798,200 @@ impl<O: CompressionOracle> Router<O> {
         }
     }
 
-    fn match_cached_messages(
+    fn select_routing_decision(
         &self,
         incoming: &CmrMessage,
-    ) -> Result<Vec<MatchedMessage>, ProcessError> {
-        let candidate_keys = self
-            .cache
-            .candidate_keys(&incoming.body, self.policy.throughput.max_match_candidates);
-        if candidate_keys.is_empty() {
-            return Ok(Vec::new());
+    ) -> Result<RoutingDecision, ProcessError> {
+        let peer_corpora = self.collect_peer_corpora();
+        if peer_corpora.is_empty() {
+            return Ok(RoutingDecision::default());
         }
-        let candidates: Vec<&CacheEntry> = candidate_keys
-            .iter()
-            .filter_map(|k| self.cache.entries.get(k))
-            .collect();
-        let payloads: Vec<Vec<u8>> = candidates
-            .iter()
-            .map(|entry| entry.message.body.clone())
-            .collect();
+
+        let mut peers: Vec<(&String, &Vec<u8>)> = peer_corpora.iter().collect();
+        peers.sort_by(|left, right| left.0.cmp(right.0));
+        let peer_names: Vec<String> = peers.iter().map(|(peer, _)| (*peer).clone()).collect();
+        let corpora: Vec<Vec<u8>> = peers.iter().map(|(_, corpus)| (*corpus).clone()).collect();
         let distances = self
             .oracle
-            .batch_ncd_sym(&incoming.body, &payloads)
+            .batch_ncd_sym(&incoming.body, &corpora)
             .map_err(ProcessError::Compression)?;
 
-        let matched = candidates
-            .into_iter()
-            .zip(distances)
-            .filter(|(_, distance)| *distance <= self.policy.spam.max_match_distance)
-            .map(|(entry, distance)| MatchedMessage {
-                message: entry.message.clone(),
-                distance,
-            })
-            .collect::<Vec<_>>();
-        Ok(filter_near_duplicate_matches(
-            matched,
-            self.policy.spam.near_duplicate_distance,
-        ))
-    }
-
-    fn build_forwards(
-        &mut self,
-        incoming: &CmrMessage,
-        matched: &[MatchedMessage],
-        now: &CmrTimestamp,
-    ) -> Vec<ForwardAction> {
-        let incoming_addresses = header_address_set(incoming);
-        let mut out = Vec::<(ForwardAction, f64)>::new();
-        let mut seen = HashSet::<(String, String, ForwardReason)>::new();
-
-        for matched in matched {
-            let cached = &matched.message;
-            let match_distance = matched.distance;
-            let cached_addresses = header_address_set(cached);
-
-            for destination in &cached_addresses {
-                if destination == &self.local_address || incoming_addresses.contains(destination) {
-                    continue;
-                }
-                if !self.can_forward_to_peer(destination) {
-                    continue;
-                }
-                let dedupe = (
-                    destination.clone(),
-                    cache_key(incoming),
-                    ForwardReason::IncomingToMatchedHeader,
-                );
-                if seen.insert(dedupe) {
-                    out.push((
-                        self.wrap_and_forward(
-                            incoming,
-                            destination,
-                            now,
-                            ForwardReason::IncomingToMatchedHeader,
-                        ),
-                        match_distance,
-                    ));
-                }
+        let mut best: Option<(String, f64)> = None;
+        let mut matched_count = 0_usize;
+        for (peer, distance) in peer_names.into_iter().zip(distances.into_iter()) {
+            if !distance.is_finite() {
+                continue;
             }
-            for destination in &incoming_addresses {
-                if destination == &self.local_address || cached_addresses.contains(destination) {
-                    continue;
-                }
-                if !self.can_forward_to_peer(destination) {
-                    continue;
-                }
-                let dedupe = (
-                    destination.clone(),
-                    cache_key(cached),
-                    ForwardReason::MatchedToIncomingHeader,
-                );
-                if seen.insert(dedupe) {
-                    out.push((
-                        self.wrap_and_forward(
-                            cached,
-                            destination,
-                            now,
-                            ForwardReason::MatchedToIncomingHeader,
-                        ),
-                        match_distance,
-                    ));
-                }
+            if distance <= self.policy.spam.max_match_distance {
+                matched_count = matched_count.saturating_add(1);
+            }
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_distance)| distance < *best_distance)
+            {
+                best = Some((peer, distance));
             }
         }
-        out.sort_by(|left, right| left.1.total_cmp(&right.1));
-        out.into_iter().map(|(action, _)| action).collect()
+
+        let Some((best_peer, best_distance)) = best else {
+            return Ok(RoutingDecision::default());
+        };
+        if best_distance > self.policy.spam.max_match_distance {
+            return Ok(RoutingDecision::default());
+        }
+        if matched_count == 0 {
+            matched_count = 1;
+        }
+
+        let incoming_senders = incoming
+            .header
+            .iter()
+            .map(|id| id.address.as_str())
+            .collect::<HashSet<_>>();
+        if incoming_senders.contains(best_peer.as_str()) {
+            let compensatory =
+                self.select_compensatory_message(incoming, &best_peer, &peer_corpora)?;
+            return Ok(RoutingDecision {
+                matched_count,
+                selection: compensatory.map(|message| RouteSelection::SendCompensatoryToPeer {
+                    destination: best_peer,
+                    message,
+                }),
+            });
+        }
+
+        Ok(RoutingDecision {
+            matched_count,
+            selection: Some(RouteSelection::ForwardIncomingToPeer {
+                destination: best_peer,
+            }),
+        })
+    }
+
+    fn collect_peer_corpora(&self) -> HashMap<String, Vec<u8>> {
+        let mut peer_corpora = HashMap::<String, Vec<u8>>::new();
+        for key in &self.cache.order {
+            let Some(entry) = self.cache.entries.get(key) else {
+                continue;
+            };
+            let sender = entry.message.immediate_sender();
+            if sender == self.local_address.as_str() {
+                continue;
+            }
+            peer_corpora
+                .entry(sender.to_owned())
+                .or_default()
+                .extend_from_slice(&entry.message.body);
+        }
+        peer_corpora
+    }
+
+    fn select_compensatory_message(
+        &self,
+        incoming: &CmrMessage,
+        best_peer: &str,
+        peer_corpora: &HashMap<String, Vec<u8>>,
+    ) -> Result<Option<CmrMessage>, ProcessError> {
+        let ordered_entries = self
+            .cache
+            .order
+            .iter()
+            .filter_map(|key| self.cache.entries.get(key))
+            .collect::<Vec<_>>();
+        if ordered_entries.len() <= 1 {
+            return Ok(None);
+        }
+
+        let total_bytes = ordered_entries
+            .iter()
+            .map(|entry| entry.message.body.len())
+            .sum::<usize>();
+        let mut x_guess = Vec::with_capacity(
+            incoming.body.len() + peer_corpora.get(best_peer).map_or(0, std::vec::Vec::len),
+        );
+        x_guess.extend_from_slice(&incoming.body);
+        if let Some(known_from_best_peer) = peer_corpora.get(best_peer) {
+            x_guess.extend_from_slice(known_from_best_peer);
+        }
+
+        let mut best_score = f64::NEG_INFINITY;
+        let mut best_message = None;
+        for (idx, entry) in ordered_entries.iter().enumerate() {
+            if message_contains_sender(&entry.message, best_peer) {
+                continue;
+            }
+            let candidate_body = &entry.message.body;
+            if total_bytes <= candidate_body.len() {
+                continue;
+            }
+
+            let mut remainder =
+                Vec::with_capacity(total_bytes.saturating_sub(candidate_body.len()));
+            for (other_idx, other_entry) in ordered_entries.iter().enumerate() {
+                if idx == other_idx {
+                    continue;
+                }
+                remainder.extend_from_slice(&other_entry.message.body);
+            }
+            if remainder.is_empty() {
+                continue;
+            }
+
+            let d_cache = self
+                .oracle
+                .ncd_sym(candidate_body, &remainder)
+                .map_err(ProcessError::Compression)?;
+            let d_guess = self
+                .oracle
+                .ncd_sym(&x_guess, candidate_body)
+                .map_err(ProcessError::Compression)?;
+            if !d_cache.is_finite() || !d_guess.is_finite() {
+                continue;
+            }
+            let score = d_cache - d_guess;
+            if score > best_score {
+                best_score = score;
+                best_message = Some(entry.message.clone());
+            }
+        }
+
+        Ok(best_message)
+    }
+
+    fn build_routing_forwards(
+        &mut self,
+        incoming: &CmrMessage,
+        decision: RoutingDecision,
+        now: &CmrTimestamp,
+    ) -> Vec<ForwardAction> {
+        match decision.selection {
+            Some(RouteSelection::ForwardIncomingToPeer { destination }) => {
+                if destination == self.local_address || !self.can_forward_to_peer(&destination) {
+                    return Vec::new();
+                }
+                vec![self.wrap_and_forward(
+                    incoming,
+                    &destination,
+                    now,
+                    ForwardReason::BestPeerRoute,
+                )]
+            }
+            Some(RouteSelection::SendCompensatoryToPeer {
+                destination,
+                message,
+            }) => {
+                if destination == self.local_address || !self.can_forward_to_peer(&destination) {
+                    return Vec::new();
+                }
+                vec![self.wrap_and_forward(
+                    &message,
+                    &destination,
+                    now,
+                    ForwardReason::CompensatoryReply,
+                )]
+            }
+            None => Vec::new(),
+        }
     }
 
     fn wrap_and_forward(
@@ -989,38 +1030,8 @@ fn cache_key(message: &CmrMessage) -> String {
         .map_or_else(|| message.header[0].to_string(), MessageId::to_string)
 }
 
-fn header_address_set(message: &CmrMessage) -> HashSet<String> {
-    message
-        .header
-        .iter()
-        .map(|id| id.address.clone())
-        .collect::<HashSet<_>>()
-}
-
-fn tokenize_for_index(body: &[u8]) -> Vec<String> {
-    let mut out = HashSet::<String>::new();
-    let mut current = Vec::<u8>::new();
-    for &b in body {
-        if b.is_ascii_alphanumeric() {
-            if current.len() < 48 {
-                current.push(b.to_ascii_lowercase());
-            }
-        } else {
-            if current.len() >= 3 {
-                let token = String::from_utf8_lossy(&current).to_string();
-                out.insert(token);
-            }
-            current.clear();
-        }
-        if out.len() >= 128 {
-            break;
-        }
-    }
-    if current.len() >= 3 {
-        let token = String::from_utf8_lossy(&current).to_string();
-        out.insert(token);
-    }
-    out.into_iter().collect()
+fn message_contains_sender(message: &CmrMessage, sender: &str) -> bool {
+    message.header.iter().any(|id| id.address == sender)
 }
 
 fn is_probably_binary(body: &[u8]) -> bool {
@@ -1042,28 +1053,6 @@ fn looks_like_executable(body: &[u8]) -> bool {
         || body.starts_with(b"\xce\xfa\xed\xfe")
         || body.starts_with(b"\xcf\xfa\xed\xfe")
         || body.starts_with(b"\xfe\xed\xfa\xcf")
-}
-
-fn filter_near_duplicate_matches(
-    mut matches: Vec<MatchedMessage>,
-    near_duplicate_distance: f64,
-) -> Vec<MatchedMessage> {
-    if matches.is_empty() {
-        return Vec::new();
-    }
-    matches.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-    let mut out = Vec::with_capacity(matches.len());
-    let mut accepted_near_duplicate = false;
-    for matched in matches {
-        if matched.distance <= near_duplicate_distance {
-            if accepted_near_duplicate {
-                continue;
-            }
-            accepted_near_duplicate = true;
-        }
-        out.push(matched);
-    }
-    out
 }
 
 fn validate_rsa_request_params(n: &BigUint, e: &BigUint) -> Result<(), ProcessError> {

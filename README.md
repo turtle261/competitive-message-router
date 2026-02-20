@@ -3,7 +3,7 @@
 [![Security](https://github.com/turtle261/agi/actions/workflows/security.yml/badge.svg)](https://github.com/turtle261/agi/actions/workflows/security.yml)
 [![CodeQL](https://github.com/turtle261/agi/actions/workflows/codeql.yml/badge.svg)](https://github.com/turtle261/agi/actions/workflows/codeql.yml)
 
-This project implements the CMR protocol defined in `agi2.html` (Appendix A) as a Rust workspace:
+This project implements the CMR protocol defined in `agi2.html` as a Rust workspace, including the Appendix A wire format and the Section 3.2 routing strategy.
 
 - `crates/cmr-core`: strict protocol parser/encoder, router logic, policy, key exchange.
 - `crates/cmr-peer`: network peer daemon (HTTP, HTTPS, UDP listeners; HTTP/HTTPS/SMTP/UDP/SSH outbound).
@@ -26,7 +26,7 @@ This project implements the CMR protocol defined in `agi2.html` (Appendix A) as 
 ## Implemented CMR Pieces
 
 - Message format (signature/header/body) and strict validation.
-- Router behavior: accept/reject, cache, matching, forwarding, per-hop re-signing.
+- Router behavior: accept/reject, cache, Section 3.2 distance routing (`D(X, Y_i)` over peer aggregates), compensatory `Z_j` replies, and per-hop re-signing.
 - Transports:
   - Server: HTTP, HTTPS, UDP.
   - Client: HTTP, HTTPS, SMTP, UDP, SSH.
@@ -125,4 +125,4 @@ The terminal dashboard provides high-level controls:
 - SMTP inbound is typically handled by your MTA and piped to `receive-stdin`.
 - For HTTPS listener, provide PEM cert/key paths in config.
 - Use pairwise unique shared keys per peer.
-- Mahoneys V2.2 Paper seemingly includes an error, suggesting an insecure raw SHA256 usage. We do not implmement that error. We use `HMAC-SHA256` for message authentication (not raw `SHA256(key || message)`), and `HKDF-SHA256` to derive keys from RSA/DH shared secrets.
+- Mahoney's V2.2 paper seemingly includes an error suggesting insecure raw SHA256 usage. We do not implement that error. We use `HMAC-SHA256` for message authentication (not raw `SHA256(key || message)`), and `HKDF-SHA256` to derive keys from RSA/DH shared secrets.

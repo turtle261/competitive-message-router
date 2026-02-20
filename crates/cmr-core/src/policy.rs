@@ -28,8 +28,6 @@ pub struct ThroughputPolicy {
     pub global_bytes_per_minute: u64,
     /// Max forwarding fanout produced by one accepted message.
     pub max_forward_actions: usize,
-    /// Max candidate messages to compare per incoming message.
-    pub max_match_candidates: usize,
 }
 
 /// Spam and semantic match policy.
@@ -39,8 +37,6 @@ pub struct SpamPolicy {
     pub min_intrinsic_dependence: f64,
     /// Maximum distance for message match/forwarding.
     pub max_match_distance: f64,
-    /// Max normalized duplicate distance to treat as near-duplicate.
-    pub near_duplicate_distance: f64,
     /// Estimator order for intrinsic-dependence checks.
     pub intrinsic_dependence_order: i64,
 }
@@ -109,12 +105,10 @@ impl RoutingPolicy {
                     global_messages_per_minute: 20_000,
                     global_bytes_per_minute: 512 * 1024 * 1024,
                     max_forward_actions: 64,
-                    max_match_candidates: 128,
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.02,
                     max_match_distance: 0.72,
-                    near_duplicate_distance: 0.12,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {
@@ -143,12 +137,10 @@ impl RoutingPolicy {
                     global_messages_per_minute: 40_000,
                     global_bytes_per_minute: 1024 * 1024 * 1024,
                     max_forward_actions: 128,
-                    max_match_candidates: 256,
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.01,
                     max_match_distance: 0.75,
-                    near_duplicate_distance: 0.15,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {
@@ -177,12 +169,10 @@ impl RoutingPolicy {
                     global_messages_per_minute: 200_000,
                     global_bytes_per_minute: 8 * 1024 * 1024 * 1024,
                     max_forward_actions: 512,
-                    max_match_candidates: 512,
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.0,
                     max_match_distance: 0.8,
-                    near_duplicate_distance: 0.2,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {
