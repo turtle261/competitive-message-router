@@ -1,7 +1,7 @@
 # Competitive Message Routing (CMR)
-[![Rust CI](https://github.com/turtle261/agi/actions/workflows/rust.yml/badge.svg)](https://github.com/turtle261/competitive-message-router/actions/workflows/rust.yml)
-[![Security](https://github.com/turtle261/agi/actions/workflows/security.yml/badge.svg)](https://github.com/turtle261/competitive-message-router/actions/workflows/security.yml)
-[![CodeQL](https://github.com/turtle261/agi/actions/workflows/codeql.yml/badge.svg)](https://github.com/turtle261/competitive-message-router/actions/workflows/codeql.yml)
+[![Rust CI](https://github.com/turtle261/competitive-message-router/actions/workflows/rust.yml/badge.svg)](https://github.com/turtle261/competitive-message-router/actions/workflows/rust.yml)
+[![Security](https://github.com/turtle261/competitive-message-router/actions/workflows/security.yml/badge.svg)](https://github.com/turtle261/competitive-message-router/actions/workflows/security.yml)
+[![CodeQL](https://github.com/turtle261/competitive-message-router/actions/workflows/codeql.yml/badge.svg)](https://github.com/turtle261/competitive-message-router/actions/workflows/codeql.yml)
 
 This project implements the CMR protocol defined in `agi2.html` as a Rust workspace, including the Appendix A wire format and the Section 3.2 routing strategy.
 
