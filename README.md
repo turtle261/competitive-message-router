@@ -61,18 +61,39 @@ Test coverage now includes:
 
 ## Run Peer
 
-1. Copy `cmr-peer.example.toml` to `cmr-peer.toml` and edit values.
-2. Start peer:
+Single entrypoint:
 
 ```bash
+cargo run -p cmr-peer -- init-config --config cmr-peer.toml
 cargo run -p cmr-peer -- run --config cmr-peer.toml
 ```
 
-3. Optional SSH forced-command mode (ingest one message from stdin):
+Optional: local end-to-end smoke test (starts runtime, probes ingest path, exits):
+
+```bash
+cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime true
+```
+
+Optional SSH forced-command mode (ingest one message from stdin):
 
 ```bash
 cargo run -p cmr-peer -- receive-stdin --config cmr-peer.toml --transport ssh
 ```
+
+### Optional TUI
+
+Build with the `tui` feature and launch with no subcommand:
+
+```bash
+cargo run -p cmr-peer --features tui
+```
+
+The dashboard provides high-level controls:
+
+- start/stop runtime
+- create/reload config template
+- execute local HTTP self-test
+- live event log
 
 ## Notes
 

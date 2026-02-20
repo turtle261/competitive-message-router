@@ -1,21 +1,27 @@
 //! Peer runtime orchestration.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bytes::Bytes;
 use cmr_core::policy::RoutingPolicy;
-use cmr_core::protocol::{CmrTimestamp, TransportKind};
+use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, TransportKind};
 use cmr_core::router::{ForwardAction, ProcessOutcome, Router};
 use http::StatusCode;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper::{Method, Request, Response, Uri};
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::ServerConfig;
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
 use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use url::form_urlencoded;
 
@@ -72,6 +78,47 @@ impl AppState {
     }
 }
 
+/// Running peer instance started by [`start_peer`].
+pub struct PeerRuntime {
+    handles: Vec<JoinHandle<()>>,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl PeerRuntime {
+    /// Number of active listener tasks.
+    #[must_use]
+    pub fn listener_count(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Requests shutdown and waits for listener tasks to finish.
+    pub async fn shutdown(mut self) {
+        let _ = self.shutdown_tx.send(true);
+        for handle in self.handles.drain(..) {
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Result of a local end-to-end HTTP self-test.
+#[derive(Clone, Debug)]
+pub struct SelfTestReport {
+    /// HTTP ingest destination used for the probe.
+    pub destination: String,
+    /// HTTP status returned by the running peer.
+    pub status: StatusCode,
+    /// Probe message size in bytes.
+    pub bytes_sent: usize,
+}
+
+impl SelfTestReport {
+    /// Returns true when the probe was accepted.
+    #[must_use]
+    pub fn accepted(&self) -> bool {
+        self.status == StatusCode::OK
+    }
+}
+
 /// App startup/runtime errors.
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -95,73 +142,100 @@ pub enum AppError {
     CompressorInit(#[from] CompressorClientInitError),
 }
 
-/// Runs peer listeners until interrupted.
-pub async fn run_peer(config: PeerConfig) -> Result<(), AppError> {
-    let policy = config.effective_policy();
-    let compressor_cfg = CompressorClientConfig {
-        command: config.compressor.command.clone(),
-        args: config.compressor.args.clone(),
-        max_frame_bytes: config.compressor.max_frame_bytes,
-    };
-    let compressor = CompressorClient::new(compressor_cfg)?;
-    let mut router = Router::new(config.local_address.clone(), policy, compressor);
-    apply_static_keys(&mut router, &config)?;
-
-    let handshake_store = Arc::new(HandshakeStore::default());
-    let transport = Arc::new(
-        TransportManager::new(
-            config.local_address.clone(),
-            config.smtp.clone(),
-            config.ssh.clone(),
-            config.prefer_http_handshake,
-            Arc::clone(&handshake_store),
-        )
-        .await?,
-    );
-    let state = AppState {
-        router: Arc::new(Mutex::new(router)),
-        transport,
-        handshake_store,
-    };
+/// Starts peer listeners and returns a runtime handle.
+pub async fn start_peer(config: PeerConfig) -> Result<PeerRuntime, AppError> {
+    let state = build_app_state(&config).await?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let mut handles = Vec::new();
     if let Some(http_cfg) = config.listen.http.clone() {
+        let listener = TcpListener::bind(&http_cfg.bind).await?;
         let state = state.clone();
+        let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(err) = run_http_listener(http_cfg.bind, http_cfg.path, state, false).await {
+            if let Err(err) =
+                run_http_listener(listener, http_cfg.path, state, false, &mut local_shutdown).await
+            {
                 eprintln!("http listener stopped with error: {err}");
             }
         }));
     }
     if let Some(https_cfg) = config.listen.https.clone() {
+        let (listener, acceptor) = bind_https_listener(&https_cfg).await?;
         let state = state.clone();
+        let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(err) = run_https_listener(https_cfg, state).await {
+            if let Err(err) = run_https_listener(
+                listener,
+                acceptor,
+                https_cfg.path,
+                state,
+                &mut local_shutdown,
+            )
+            .await
+            {
                 eprintln!("https listener stopped with error: {err}");
             }
         }));
     }
     if let Some(udp_cfg) = config.listen.udp.clone() {
+        let socket = UdpSocket::bind(&udp_cfg.bind).await?;
         let state = state.clone();
+        let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(err) = run_udp_listener(udp_cfg.bind, udp_cfg.service, state).await {
+            if let Err(err) =
+                run_udp_listener(socket, udp_cfg.service, state, &mut local_shutdown).await
+            {
                 eprintln!("udp listener stopped with error: {err}");
             }
         }));
     }
+
     if handles.is_empty() {
         return Err(AppError::InvalidConfig(
             "at least one listener (http/https/udp) must be configured".to_owned(),
         ));
     }
 
+    Ok(PeerRuntime {
+        handles,
+        shutdown_tx,
+    })
+}
+
+/// Runs peer listeners until interrupted.
+pub async fn run_peer(config: PeerConfig) -> Result<(), AppError> {
+    let runtime = start_peer(config).await?;
     tokio::signal::ctrl_c()
         .await
         .map_err(|e| AppError::Runtime(format!("ctrl-c handler: {e}")))?;
-    for handle in handles {
-        handle.abort();
-    }
+    runtime.shutdown().await;
     Ok(())
+}
+
+/// Starts the runtime, executes a local HTTP self-test, and shuts down.
+pub async fn run_http_self_test_with_runtime(
+    config: PeerConfig,
+) -> Result<SelfTestReport, AppError> {
+    let runtime = start_peer(config.clone()).await?;
+    // Give listener tasks one scheduler tick to enter their accept loops.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let result = run_http_self_test(&config).await;
+    runtime.shutdown().await;
+    result
+}
+
+/// Executes a local end-to-end HTTP self-test against a running peer instance.
+pub async fn run_http_self_test(config: &PeerConfig) -> Result<SelfTestReport, AppError> {
+    let report = probe_http_self_test(config).await?;
+    if report.accepted() {
+        Ok(report)
+    } else {
+        Err(AppError::Runtime(format!(
+            "self-test message was rejected with status {}",
+            report.status
+        )))
+    }
 }
 
 /// Ingests one message from stdin (useful for ssh forced-command mode).
@@ -192,6 +266,35 @@ pub async fn ingest_stdin_once(
     Ok(())
 }
 
+async fn build_app_state(config: &PeerConfig) -> Result<AppState, AppError> {
+    let policy = config.effective_policy();
+    let compressor_cfg = CompressorClientConfig {
+        command: config.compressor.command.clone(),
+        args: config.compressor.args.clone(),
+        max_frame_bytes: config.compressor.max_frame_bytes,
+    };
+    let compressor = CompressorClient::new(compressor_cfg)?;
+    let mut router = Router::new(config.local_address.clone(), policy, compressor);
+    apply_static_keys(&mut router, config)?;
+
+    let handshake_store = Arc::new(HandshakeStore::default());
+    let transport = Arc::new(
+        TransportManager::new(
+            config.local_address.clone(),
+            config.smtp.clone(),
+            config.ssh.clone(),
+            config.prefer_http_handshake,
+            Arc::clone(&handshake_store),
+        )
+        .await?,
+    );
+    Ok(AppState {
+        router: Arc::new(Mutex::new(router)),
+        transport,
+        handshake_store,
+    })
+}
+
 fn apply_static_keys(
     router: &mut Router<CompressorClient>,
     config: &PeerConfig,
@@ -204,77 +307,123 @@ fn apply_static_keys(
     Ok(())
 }
 
-async fn run_http_listener(
-    bind: String,
-    path: String,
-    state: AppState,
-    is_https: bool,
-) -> Result<(), AppError> {
-    let listener = TcpListener::bind(&bind).await?;
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        let path = path.clone();
-        tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let service = service_fn(move |req| {
-                handle_http_request(req, path.clone(), state.clone(), is_https)
-            });
-            if let Err(err) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, service)
-                .await
-            {
-                eprintln!("http conn error: {err}");
-            }
-        });
-    }
-}
-
-async fn run_https_listener(cfg: HttpsListenConfig, state: AppState) -> Result<(), AppError> {
+async fn bind_https_listener(
+    cfg: &HttpsListenConfig,
+) -> Result<(TcpListener, TlsAcceptor), AppError> {
     let tls_cfg = load_tls_config(&cfg.cert_path, &cfg.key_path)?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_cfg));
     let listener = TcpListener::bind(&cfg.bind).await?;
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        let acceptor = acceptor.clone();
-        let path = cfg.path.clone();
-        tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(stream).await {
-                Ok(s) => s,
-                Err(err) => {
-                    eprintln!("tls accept error: {err}");
-                    return;
-                }
-            };
-            let io = TokioIo::new(tls_stream);
-            let service =
-                service_fn(move |req| handle_http_request(req, path.clone(), state.clone(), true));
-            if let Err(err) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, service)
-                .await
-            {
-                eprintln!("https conn error: {err}");
-            }
-        });
-    }
+    Ok((listener, acceptor))
 }
 
-async fn run_udp_listener(bind: String, service: String, state: AppState) -> Result<(), AppError> {
-    let socket = UdpSocket::bind(bind).await?;
+async fn run_http_listener(
+    listener: TcpListener,
+    path: String,
+    state: AppState,
+    is_https: bool,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<(), AppError> {
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let state = state.clone();
+                let path = path.clone();
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |req| {
+                        handle_http_request(req, path.clone(), state.clone(), is_https)
+                    });
+                    if let Err(err) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
+                    {
+                        eprintln!("http conn error: {err}");
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_https_listener(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    path: String,
+    state: AppState,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<(), AppError> {
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let state = state.clone();
+                let acceptor = acceptor.clone();
+                let path = path.clone();
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(err) => {
+                            eprintln!("tls accept error: {err}");
+                            return;
+                        }
+                    };
+                    let io = TokioIo::new(tls_stream);
+                    let service = service_fn(move |req| {
+                        handle_http_request(req, path.clone(), state.clone(), true)
+                    });
+                    if let Err(err) = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, service)
+                        .await
+                    {
+                        eprintln!("https conn error: {err}");
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_udp_listener(
+    socket: UdpSocket,
+    service: String,
+    state: AppState,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<(), AppError> {
     eprintln!("udp listener active for service tag `{service}`");
     let mut buf = vec![0_u8; 65_536];
     loop {
-        let (size, _) = socket.recv_from(&mut buf).await?;
-        let payload = buf[..size].to_vec();
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = state.ingest_and_forward(payload, TransportKind::Udp).await {
-                eprintln!("udp ingest failed: {err}");
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
             }
-        });
+            recv_result = socket.recv_from(&mut buf) => {
+                let (size, _) = recv_result?;
+                let payload = buf[..size].to_vec();
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = state.ingest_and_forward(payload, TransportKind::Udp).await {
+                        eprintln!("udp ingest failed: {err}");
+                    }
+                });
+            }
+        }
     }
+    Ok(())
 }
 
 async fn handle_http_request(
@@ -390,4 +539,110 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> Result<ServerConfig, AppE
         .with_single_cert(certs, key)
         .map_err(|e| AppError::Tls(format!("invalid certificate/key pair: {e}")))?;
     Ok(cfg)
+}
+
+async fn probe_http_self_test(config: &PeerConfig) -> Result<SelfTestReport, AppError> {
+    let http = config.listen.http.as_ref().ok_or_else(|| {
+        AppError::InvalidConfig("self-test requires [listen.http] to be configured".to_owned())
+    })?;
+    let target = loopback_http_target(&http.bind, &http.path)?;
+    let payload = build_self_test_message();
+    let status = post_http_payload(target.clone(), payload.clone()).await?;
+    Ok(SelfTestReport {
+        destination: target,
+        status,
+        bytes_sent: payload.len(),
+    })
+}
+
+async fn post_http_payload(target: String, payload: Vec<u8>) -> Result<StatusCode, AppError> {
+    let mut connector = HttpConnector::new();
+    connector.enforce_http(true);
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build(connector);
+
+    let uri: Uri = target
+        .parse()
+        .map_err(|e| AppError::InvalidConfig(format!("invalid self-test uri `{target}`: {e}")))?;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("Content-Type", "application/octet-stream")
+        .body(Full::new(Bytes::from(payload)))
+        .map_err(|e| AppError::Runtime(format!("failed to build self-test request: {e}")))?;
+
+    let resp = client
+        .request(req)
+        .await
+        .map_err(|e| AppError::Runtime(format!("self-test request failed: {e}")))?;
+    Ok(resp.status())
+}
+
+fn build_self_test_message() -> Vec<u8> {
+    let mut body = Vec::with_capacity(16 * 80);
+    for _ in 0..80 {
+        body.extend_from_slice(b"cmr-self-test ");
+    }
+
+    CmrMessage {
+        signature: Signature::Unsigned,
+        header: vec![MessageId {
+            timestamp: CmrTimestamp::now_utc(),
+            address: "http://cmr-self-test.local/source".to_owned(),
+        }],
+        body,
+    }
+    .to_bytes()
+}
+
+fn loopback_http_target(bind: &str, path: &str) -> Result<String, AppError> {
+    let socket: SocketAddr = bind
+        .parse()
+        .map_err(|e| AppError::InvalidConfig(format!("invalid HTTP bind address `{bind}`: {e}")))?;
+
+    let host = match socket.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let normalized_path = normalize_ingest_path(path);
+
+    Ok(match host {
+        IpAddr::V4(ip) => format!("http://{ip}:{}{normalized_path}", socket.port()),
+        IpAddr::V6(ip) => format!("http://[{ip}]:{}{normalized_path}", socket.port()),
+    })
+}
+
+fn normalize_ingest_path(path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        "/".to_owned()
+    } else if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{loopback_http_target, normalize_ingest_path};
+
+    #[test]
+    fn normalize_path_preserves_or_adds_leading_slash() {
+        assert_eq!(normalize_ingest_path(""), "/");
+        assert_eq!(normalize_ingest_path("/cmr"), "/cmr");
+        assert_eq!(normalize_ingest_path("cmr"), "/cmr");
+    }
+
+    #[test]
+    fn loopback_target_rewrites_unspecified_ipv4() {
+        let url = loopback_http_target("0.0.0.0:8080", "/cmr").expect("target");
+        assert_eq!(url, "http://127.0.0.1:8080/cmr");
+    }
+
+    #[test]
+    fn loopback_target_supports_ipv6() {
+        let url = loopback_http_target("[::]:9000", "cmr").expect("target");
+        assert_eq!(url, "http://[::1]:9000/cmr");
+    }
 }

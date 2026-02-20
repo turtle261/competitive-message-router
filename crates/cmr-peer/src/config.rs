@@ -1,5 +1,6 @@
 //! Runtime configuration.
 
+use std::io::Write;
 use std::path::Path;
 
 use cmr_core::policy::{RoutingPolicy, SecurityLevel};
@@ -51,6 +52,22 @@ impl PeerConfig {
             .clone()
             .unwrap_or_else(|| RoutingPolicy::for_level(self.security_level))
     }
+}
+
+/// Embedded example configuration template.
+pub const EXAMPLE_CONFIG_TOML: &str = include_str!("../../../cmr-peer.example.toml");
+
+/// Writes the embedded example config to `path`.
+pub fn write_example_config(path: impl AsRef<Path>, overwrite: bool) -> Result<(), std::io::Error> {
+    if overwrite {
+        return std::fs::write(path, EXAMPLE_CONFIG_TOML);
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(EXAMPLE_CONFIG_TOML.as_bytes())
 }
 
 /// Network listeners.
@@ -209,4 +226,34 @@ fn default_ssh_binary() -> String {
 
 fn default_ssh_remote_command() -> String {
     "cmr-peer receive-stdin".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_example_config;
+
+    #[test]
+    fn write_example_config_honors_overwrite_flag() {
+        let path = std::env::temp_dir().join(format!(
+            "cmr-peer-example-config-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        write_example_config(&path, false).expect("write initial template");
+        let first = std::fs::read_to_string(&path).expect("read first");
+        assert!(first.contains("local_address"));
+
+        let err = write_example_config(&path, false).expect_err("second create should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        write_example_config(&path, true).expect("overwrite template");
+        let second = std::fs::read_to_string(&path).expect("read second");
+        assert_eq!(first, second);
+
+        let _ = std::fs::remove_file(path);
+    }
 }
