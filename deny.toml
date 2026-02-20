@@ -35,6 +35,3 @@ skip-tree = []
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = [
-  "https://github.com/turtle261/infotheory",
-]
