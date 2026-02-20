@@ -55,7 +55,7 @@ impl PeerConfig {
 }
 
 /// Embedded example configuration template.
-pub const EXAMPLE_CONFIG_TOML: &str = include_str!("../../../cmr-peer.example.toml");
+pub const EXAMPLE_CONFIG_TOML: &str = include_str!("../cmr-peer.example.toml");
 
 /// Writes the embedded example config to `path`.
 pub fn write_example_config(path: impl AsRef<Path>, overwrite: bool) -> Result<(), std::io::Error> {

@@ -3,6 +3,13 @@ name = "cmr-peer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "CMR peer daemon with HTTP/HTTPS/UDP listeners and multi-transport outbound delivery."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/cmr-peer"
+keywords = ["cmr", "peer", "routing", "daemon"]
+categories = ["network-programming", "command-line-utilities"]
 
 [features]
 default = []
@@ -11,7 +18,7 @@ tui = ["dep:crossterm"]
 [dependencies]
 bytes = "1.10.1"
 clap = { version = "4.5.53", features = ["derive"] }
-cmr-core = { path = "../cmr-core" }
+cmr-core = { version = "0.1.0", path = "../cmr-core" }
 crossterm = { version = "0.28.1", optional = true }
 hex = "0.4.3"
 http = "1.3.1"
