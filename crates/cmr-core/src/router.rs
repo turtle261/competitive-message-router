@@ -30,8 +30,6 @@ pub enum CompressionError {
 
 /// Compression capability (intentionally abstracted from router process).
 pub trait CompressionOracle: Send + Sync {
-    /// Symmetric NCD-like distance.
-    fn ncd_sym(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError>;
     /// CMR Section 3.2 compression distance from spec:
     /// `C(XY)-C(X) + C(YX)-C(Y)`.
     fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError>;
@@ -46,18 +44,6 @@ pub trait CompressionOracle: Send + Sync {
         let mut out = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             out.push(self.compression_distance(target, candidate)?);
-        }
-        Ok(out)
-    }
-    /// Batch NCD, defaulting to repeated scalar calls.
-    fn batch_ncd_sym(
-        &self,
-        target: &[u8],
-        candidates: &[Vec<u8>],
-    ) -> Result<Vec<f64>, CompressionError> {
-        let mut out = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            out.push(self.ncd_sym(target, candidate)?);
         }
         Ok(out)
     }
@@ -1647,10 +1633,6 @@ mod tests {
     struct StubOracle;
 
     impl CompressionOracle for StubOracle {
-        fn ncd_sym(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-            Ok(0.4)
-        }
-
         fn compression_distance(
             &self,
             _left: &[u8],

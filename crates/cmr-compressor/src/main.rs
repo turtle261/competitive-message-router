@@ -6,7 +6,7 @@ use cmr_core::compressor_ipc::{
     CompressorRequest, CompressorResponse, DEFAULT_MAX_FRAME_BYTES, IpcError, read_frame,
     write_frame,
 };
-use infotheory::{InfotheoryCtx, NcdVariant};
+use infotheory::InfotheoryCtx;
 
 fn main() {
     let stdin = std::io::stdin();
@@ -40,9 +40,6 @@ fn main() {
 fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResponse {
     match req {
         CompressorRequest::Health => CompressorResponse::Health { ok: true },
-        CompressorRequest::NcdSym { left, right } => CompressorResponse::NcdSym {
-            value: ctx.ncd_bytes(&left, &right, NcdVariant::SymVitanyi),
-        },
         CompressorRequest::CompressionDistance { left, right } => {
             CompressorResponse::CompressionDistance {
                 value: compression_distance(ctx, &left, &right),
@@ -52,13 +49,6 @@ fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResp
             CompressorResponse::IntrinsicDependence {
                 value: ctx.intrinsic_dependence_bytes(&data, max_order),
             }
-        }
-        CompressorRequest::BatchNcdSym { target, candidates } => {
-            let values = candidates
-                .iter()
-                .map(|candidate| ctx.ncd_bytes(&target, candidate, NcdVariant::SymVitanyi))
-                .collect();
-            CompressorResponse::BatchNcdSym { values }
         }
         CompressorRequest::BatchCompressionDistance { target, candidates } => {
             let values = candidates

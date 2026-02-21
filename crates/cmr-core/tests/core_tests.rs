@@ -17,47 +17,34 @@ use proptest::prelude::*;
 struct StubOracle {
     intrinsic: f64,
     distance: f64,
-    ncd: f64,
     fail_intrinsic: bool,
-    fail_ncd: bool,
+    fail_distance: bool,
 }
 
 impl StubOracle {
-    fn ok(intrinsic: f64, ncd: f64) -> Self {
-        Self {
-            intrinsic,
-            distance: ncd,
-            ncd,
-            fail_intrinsic: false,
-            fail_ncd: false,
-        }
-    }
-
-    fn with_distances(intrinsic: f64, distance: f64, ncd: f64) -> Self {
+    fn ok(intrinsic: f64, distance: f64) -> Self {
         Self {
             intrinsic,
             distance,
-            ncd,
             fail_intrinsic: false,
-            fail_ncd: false,
+            fail_distance: false,
+        }
+    }
+
+    fn with_distances(intrinsic: f64, distance: f64) -> Self {
+        Self {
+            intrinsic,
+            distance,
+            fail_intrinsic: false,
+            fail_distance: false,
         }
     }
 }
 
 impl CompressionOracle for StubOracle {
-    fn ncd_sym(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
-        if self.fail_ncd {
-            Err(CompressionError::Failed("ncd failed".to_owned()))
-        } else if left == right {
-            Ok(0.0)
-        } else {
-            Ok(self.ncd)
-        }
-    }
-
     fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
-        if self.fail_ncd {
-            Err(CompressionError::Failed("ncd failed".to_owned()))
+        if self.fail_distance {
+            Err(CompressionError::Failed("distance failed".to_owned()))
         } else if left == right {
             Ok(0.0)
         } else {
@@ -73,28 +60,13 @@ impl CompressionOracle for StubOracle {
         }
     }
 
-    fn batch_ncd_sym(
-        &self,
-        target: &[u8],
-        candidates: &[Vec<u8>],
-    ) -> Result<Vec<f64>, CompressionError> {
-        if self.fail_ncd {
-            Err(CompressionError::Failed("ncd failed".to_owned()))
-        } else {
-            candidates
-                .iter()
-                .map(|candidate| self.ncd_sym(target, candidate))
-                .collect()
-        }
-    }
-
     fn batch_compression_distance(
         &self,
         target: &[u8],
         candidates: &[Vec<u8>],
     ) -> Result<Vec<f64>, CompressionError> {
-        if self.fail_ncd {
-            Err(CompressionError::Failed("ncd failed".to_owned()))
+        if self.fail_distance {
+            Err(CompressionError::Failed("distance failed".to_owned()))
         } else {
             candidates
                 .iter()
@@ -250,14 +222,17 @@ fn key_exchange_rejects_malformed_or_uppercase_hex() {
 
 #[test]
 fn ipc_round_trip_and_bounds() {
-    let request = CompressorRequest::BatchNcdSym {
+    let request = CompressorRequest::BatchCompressionDistance {
         target: b"alpha".to_vec(),
         candidates: vec![b"beta".to_vec(), b"gamma".to_vec()],
     };
     let mut bytes = Vec::new();
     write_frame(&mut bytes, &request).expect("write");
     let decoded: CompressorRequest = read_frame(&mut Cursor::new(bytes), 1024).expect("read");
-    assert!(matches!(decoded, CompressorRequest::BatchNcdSym { .. }));
+    assert!(matches!(
+        decoded,
+        CompressorRequest::BatchCompressionDistance { .. }
+    ));
 
     let oversized = {
         let mut v = Vec::new();
@@ -469,7 +444,7 @@ fn router_routes_compensatory_message_when_best_peer_already_sent_x() {
     let mut router = Router::new(
         "http://local".to_owned(),
         policy,
-        StubOracle::with_distances(0.9, 0.1, 0.8),
+        StubOracle::with_distances(0.9, 0.1),
     );
     router.set_shared_key("http://bob", b"bob-key".to_vec());
 
@@ -601,9 +576,8 @@ fn router_rejects_non_finite_intrinsic_dependence() {
         StubOracle {
             intrinsic: f64::NAN,
             distance: 0.2,
-            ncd: 0.2,
             fail_intrinsic: false,
-            fail_ncd: false,
+            fail_distance: false,
         },
     );
     let raw = message_with_sender("http://alice", b"hello", None, "2029/12/31 23:59:59");
@@ -740,7 +714,7 @@ fn router_uses_compression_distance_metric_for_matching() {
     let mut router = Router::new(
         "http://local".to_owned(),
         policy,
-        StubOracle::with_distances(0.9, 0.1, 0.95),
+        StubOracle::with_distances(0.9, 0.1),
     );
 
     let seed = message_with_sender("http://sink", b"topic alpha", None, "2029/12/31 23:59:59");
@@ -765,10 +739,6 @@ struct InspectOracle {
 type DistanceCallLog = Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>;
 
 impl CompressionOracle for InspectOracle {
-    fn ncd_sym(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-        Ok(0.1)
-    }
-
     fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
         self.calls
             .lock()

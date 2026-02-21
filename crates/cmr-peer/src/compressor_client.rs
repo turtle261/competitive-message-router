@@ -128,19 +128,6 @@ impl CompressorClient {
 }
 
 impl CompressionOracle for CompressorClient {
-    fn ncd_sym(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
-        match self.request(CompressorRequest::NcdSym {
-            left: left.to_vec(),
-            right: right.to_vec(),
-        })? {
-            CompressorResponse::NcdSym { value } => Ok(value),
-            CompressorResponse::Error { message } => Err(CompressionError::Failed(message)),
-            other => Err(CompressionError::Failed(format!(
-                "unexpected ncd response variant: {other:?}"
-            ))),
-        }
-    }
-
     fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
         match self.request(CompressorRequest::CompressionDistance {
             left: left.to_vec(),
@@ -180,23 +167,6 @@ impl CompressionOracle for CompressorClient {
             CompressorResponse::Error { message } => Err(CompressionError::Failed(message)),
             other => Err(CompressionError::Failed(format!(
                 "unexpected batch compression distance response variant: {other:?}"
-            ))),
-        }
-    }
-
-    fn batch_ncd_sym(
-        &self,
-        target: &[u8],
-        candidates: &[Vec<u8>],
-    ) -> Result<Vec<f64>, CompressionError> {
-        match self.request(CompressorRequest::BatchNcdSym {
-            target: target.to_vec(),
-            candidates: candidates.to_vec(),
-        })? {
-            CompressorResponse::BatchNcdSym { values } => Ok(values),
-            CompressorResponse::Error { message } => Err(CompressionError::Failed(message)),
-            other => Err(CompressionError::Failed(format!(
-                "unexpected batch ncd response variant: {other:?}"
             ))),
         }
     }

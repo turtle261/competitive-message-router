@@ -23,28 +23,16 @@ use tokio::sync::oneshot;
 #[derive(Clone)]
 struct Oracle {
     intrinsic: f64,
-    ncd: f64,
+    distance: f64,
 }
 
 impl CompressionOracle for Oracle {
-    fn ncd_sym(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-        Ok(self.ncd)
-    }
-
     fn compression_distance(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-        Ok(self.ncd)
+        Ok(self.distance)
     }
 
     fn intrinsic_dependence(&self, _data: &[u8], _max_order: i64) -> Result<f64, CompressionError> {
         Ok(self.intrinsic)
-    }
-
-    fn batch_ncd_sym(
-        &self,
-        _target: &[u8],
-        candidates: &[Vec<u8>],
-    ) -> Result<Vec<f64>, CompressionError> {
-        Ok(vec![self.ncd; candidates.len()])
     }
 }
 
@@ -384,7 +372,7 @@ async fn end_to_end_router_and_http_transport_forwards_valid_cmr_message() {
         permissive_policy(),
         Oracle {
             intrinsic: 0.9,
-            ncd: 0.1,
+            distance: 0.1,
         },
     );
 
