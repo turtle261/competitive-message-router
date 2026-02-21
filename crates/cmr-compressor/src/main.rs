@@ -13,7 +13,8 @@ fn main() {
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
-    let ctx = InfotheoryCtx::default();
+    let zpaq_method = resolve_zpaq_method(std::env::args().skip(1));
+    let ctx = InfotheoryCtx::with_zpaq(zpaq_method);
 
     loop {
         let req = match read_frame::<CompressorRequest>(&mut reader, DEFAULT_MAX_FRAME_BYTES) {
@@ -35,6 +36,34 @@ fn main() {
             break;
         }
     }
+}
+
+fn resolve_zpaq_method(args: impl Iterator<Item = String>) -> String {
+    let mut method_from_args: Option<String> = None;
+    let mut pending_method = false;
+    for arg in args {
+        if pending_method {
+            if !arg.is_empty() {
+                method_from_args = Some(arg);
+            }
+            pending_method = false;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--zpaq-method=") {
+            if !value.is_empty() {
+                method_from_args = Some(value.to_owned());
+            }
+            continue;
+        }
+        if arg == "--zpaq-method" {
+            pending_method = true;
+        }
+    }
+
+    method_from_args
+        .or_else(|| std::env::var("CMR_ZPAQ_METHOD").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "5".to_owned())
 }
 
 fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResponse {
