@@ -184,7 +184,7 @@ impl RoutingPolicy {
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.0,
-                    max_match_distance: 0.8,
+                    max_match_distance: 0.95,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {
