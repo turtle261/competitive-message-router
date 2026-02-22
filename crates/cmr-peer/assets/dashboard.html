@@ -1717,6 +1717,9 @@
             ${(Array.isArray(state.composeResult.unsigned_requested_destinations) && state.composeResult.unsigned_requested_destinations.length)
               ? `<div class="callout warn space">Sign was requested, but no shared key exists for: ${escapeHtml(state.composeResult.unsigned_requested_destinations.join(", "))}</div>`
               : ""}
+            ${((state.composeResult.transport_sent_count || 0) === 0 && (Array.isArray(state.composeResult.returned_matches) ? state.composeResult.returned_matches.length : 0) === 0)
+              ? '<div class="callout warn space">Posted locally, but no semantic matches were returned and no outbound delivery succeeded yet.</div>'
+              : ""}
 
             <div class="table-wrap space">
               <table>
