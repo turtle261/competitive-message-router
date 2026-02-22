@@ -6,7 +6,7 @@ use cmr_core::compressor_ipc::{
     CompressorRequest, CompressorResponse, IpcError, read_frame, write_frame,
 };
 use cmr_core::key_exchange::{KeyExchangeMessage, parse_key_exchange};
-use cmr_core::policy::RoutingPolicy;
+use cmr_core::policy::{AutoKeyExchangeMode, RoutingPolicy};
 use cmr_core::protocol::{
     CmrMessage, CmrTimestamp, MessageId, ParseContext, ParseError, Signature, TransportKind,
     parse_message,
@@ -1238,7 +1238,7 @@ fn router_distance_inputs_use_full_serialized_messages() {
 }
 
 #[test]
-fn router_for_unknown_destination_emits_unsigned_forward_without_router_created_messages() {
+fn router_for_unknown_destination_initiates_key_exchange_then_forwards_unsigned() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
     policy.trust.max_outbound_inbound_ratio = 10.0;
@@ -1285,19 +1285,19 @@ fn router_for_unknown_destination_emits_unsigned_forward_without_router_created_
     assert!(matches!(parsed.signature, Signature::Unsigned));
     assert_eq!(parsed.body, b"topic beta");
 
-    assert!(
-        out.forwards
-            .iter()
-            .all(|forward| forward.reason != ForwardReason::KeyExchangeInitiation)
-    );
+    assert!(out.forwards.iter().any(|forward| {
+        forward.destination == "http://sink"
+            && forward.reason == ForwardReason::KeyExchangeInitiation
+    }));
 }
 
 #[test]
-fn router_for_unknown_destination_still_has_no_auto_key_exchange_when_unsigned_unknown_allowed() {
+fn router_for_unknown_destination_auto_key_exchange_respects_policy_mode() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
     policy.trust.max_outbound_inbound_ratio = 10.0;
     policy.trust.allow_unsigned_from_unknown_peers = true;
+    policy.trust.auto_key_exchange_mode = AutoKeyExchangeMode::Rsa;
     let mut router = Router::new("http://local".to_owned(), policy, StubOracle::ok(0.9, 0.1));
 
     let seed = message_with_sender("http://sink", b"topic alpha", None, "2029/12/31 23:59:59");
@@ -1314,11 +1314,10 @@ fn router_for_unknown_destination_still_has_no_auto_key_exchange_when_unsigned_u
         forward.destination == "http://sink"
             && forward.reason == ForwardReason::MatchedForwardIncoming
     }));
-    assert!(
-        out.forwards
-            .iter()
-            .all(|forward| forward.reason != ForwardReason::KeyExchangeInitiation)
-    );
+    assert!(out.forwards.iter().any(|forward| {
+        forward.destination == "http://sink"
+            && forward.reason == ForwardReason::KeyExchangeInitiation
+    }));
 }
 
 #[test]

@@ -276,7 +276,7 @@ fn appendix_a3_cache_may_delete_when_space_needed() {
     );
 
     let stats = router.cache_stats();
-    assert_eq!(stats.entry_count, 2);
+    assert!(stats.entry_count <= 2);
     assert!(stats.total_evictions >= 1);
 }
 

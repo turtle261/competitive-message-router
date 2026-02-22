@@ -12,7 +12,7 @@ use sha2::Sha256;
 use thiserror::Error;
 
 use crate::key_exchange::{KeyExchangeError, KeyExchangeMessage, mod_pow, parse_key_exchange};
-use crate::policy::RoutingPolicy;
+use crate::policy::{AutoKeyExchangeMode, RoutingPolicy};
 use crate::protocol::{
     CmrMessage, CmrTimestamp, MessageId, ParseContext, ParseError, Signature, TransportKind,
     parse_message,
@@ -1566,7 +1566,21 @@ impl<O: CompressionOracle> Router<O> {
             return Vec::new();
         }
 
-        vec![self.wrap_and_forward(message, destination, now, reason)]
+        let mut out = Vec::with_capacity(2);
+        if !self.shared_keys.contains_key(destination)
+            && !self.pending_rsa.contains_key(destination)
+            && !self.pending_dh.contains_key(destination)
+        {
+            let kx = match self.policy.trust.auto_key_exchange_mode {
+                AutoKeyExchangeMode::Rsa => self.build_rsa_initiation(destination, now),
+                AutoKeyExchangeMode::Dh => self.build_dh_initiation(destination, now),
+            };
+            if let Some(action) = kx {
+                out.push(action);
+            }
+        }
+        out.push(self.wrap_and_forward(message, destination, now, reason));
+        out
     }
 
     fn build_rsa_initiation(
