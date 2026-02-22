@@ -31,6 +31,7 @@ const UDP_MAX_PAYLOAD_BYTES: usize = 65_507;
 const DEFAULT_HANDSHAKE_TTL_SECONDS: u64 = 300;
 const DEFAULT_HANDSHAKE_MAX_ENTRIES: usize = 1024;
 const DEFAULT_HANDSHAKE_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_HANDSHAKE_MAX_READS: u8 = 1;
 
 /// Stored one-time HTTP handshake payloads.
 pub struct HandshakeStore {
@@ -53,6 +54,7 @@ struct StoredPayload {
     payload: Vec<u8>,
     inserted_at: Instant,
     seq: u64,
+    remaining_reads: u8,
 }
 
 impl HandshakeStore {
@@ -74,7 +76,7 @@ impl HandshakeStore {
         }
     }
 
-    /// Stores one message payload under a one-time key.
+    /// Stores one message payload under a short-lived key.
     pub fn put(&self, key: String, payload: Vec<u8>) -> bool {
         let Ok(mut guard) = self.inner.lock() else {
             return false;
@@ -97,6 +99,7 @@ impl HandshakeStore {
                 payload,
                 inserted_at: Instant::now(),
                 seq,
+                remaining_reads: DEFAULT_HANDSHAKE_MAX_READS,
             },
         );
         guard.order.push_back((key.clone(), seq));
@@ -104,10 +107,16 @@ impl HandshakeStore {
         guard.payloads.contains_key(&key)
     }
 
-    /// Takes and removes one payload.
+    /// Returns one payload read and decrements remaining read budget.
     pub fn take(&self, key: &str) -> Option<Vec<u8>> {
         let mut guard = self.inner.lock().ok()?;
         prune_expired(&mut guard);
+        if let Some(entry) = guard.payloads.get_mut(key)
+            && entry.remaining_reads > 1
+        {
+            entry.remaining_reads = entry.remaining_reads.saturating_sub(1);
+            return Some(entry.payload.clone());
+        }
         let entry = guard.payloads.remove(key)?;
         guard.total_bytes = guard.total_bytes.saturating_sub(entry.payload.len());
         Some(entry.payload)
