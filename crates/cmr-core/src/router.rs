@@ -359,6 +359,12 @@ struct RoutingDecision {
     compensatory: Option<(String, CmrMessage)>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct RoutingActions {
+    forwards: Vec<ForwardAction>,
+    client_plans: Vec<ClientMessagePlan>,
+}
+
 /// Prepared outbound action.
 #[derive(Clone, Debug)]
 pub struct ForwardAction {
@@ -774,8 +780,8 @@ impl<O: CompressionOracle> Router<O> {
         &mut self,
         destination: &str,
         now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
-        self.build_rsa_initiation(destination, now)
+    ) -> Option<ClientMessagePlan> {
+        self.build_rsa_initiation_plan(destination, now)
     }
 
     /// Builds a DH key-exchange initiation for a destination peer.
@@ -783,8 +789,8 @@ impl<O: CompressionOracle> Router<O> {
         &mut self,
         destination: &str,
         now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
-        self.build_dh_initiation(destination, now)
+    ) -> Option<ClientMessagePlan> {
+        self.build_dh_initiation_plan(destination, now)
     }
 
     /// Initiates clear key-exchange by sending shared key bytes over a secure channel.
@@ -792,35 +798,23 @@ impl<O: CompressionOracle> Router<O> {
         &mut self,
         destination: &str,
         clear_key: Vec<u8>,
-        now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
+        _now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
         if clear_key.is_empty() {
             return None;
         }
-        let mut msg = CmrMessage {
-            signature: Signature::Unsigned,
-            header: vec![MessageId {
-                timestamp: self.next_forward_timestamp(now, None),
-                address: self.local_address.clone(),
-            }],
-            body: KeyExchangeMessage::ClearKey {
-                key: clear_key.clone(),
-            }
-            .render()
-            .into_bytes(),
-        };
-        if let Some(existing) = self.shared_keys.get(destination) {
-            msg.sign_with_key(existing);
-        }
-        self.cache.insert(msg.clone());
+        let signing_key = self.shared_keys.get(destination).cloned();
         self.shared_keys.insert(
             destination.to_owned(),
             derive_exchange_key_from_bytes(&self.local_address, destination, b"clear", &clear_key),
         );
         self.purge_key_exchange_cache(destination);
-        Some(ForwardAction {
+        Some(ClientMessagePlan {
             destination: destination.to_owned(),
-            message_bytes: msg.to_bytes(),
+            body: KeyExchangeMessage::ClearKey { key: clear_key }
+                .render()
+                .into_bytes(),
+            signing_key,
             reason: ForwardReason::KeyExchangeInitiation,
         })
     }
@@ -972,10 +966,15 @@ impl<O: CompressionOracle> Router<O> {
         self.record_peer_inbound(&sender, raw_message.len());
         self.adjust_peer_reputation(&sender, 0.4);
 
-        let mut limited = self.build_routing_forwards(&parsed, routing, &now);
-        limited.truncate(self.policy.throughput.max_forward_actions);
-        outcome.forwards = limited;
-        outcome.client_plans = Vec::new();
+        let mut actions = self.build_routing_actions(&parsed, routing, &now);
+        actions
+            .forwards
+            .truncate(self.policy.throughput.max_forward_actions);
+        actions
+            .client_plans
+            .truncate(self.policy.throughput.max_forward_actions);
+        outcome.forwards = actions.forwards;
+        outcome.client_plans = actions.client_plans;
         outcome
     }
 
@@ -1472,13 +1471,13 @@ impl<O: CompressionOracle> Router<O> {
         Ok(best_message)
     }
 
-    fn build_routing_forwards(
+    fn build_routing_actions(
         &mut self,
         incoming: &CmrMessage,
         decision: RoutingDecision,
         now: &CmrTimestamp,
-    ) -> Vec<ForwardAction> {
-        let mut out = Vec::new();
+    ) -> RoutingActions {
+        let mut out = RoutingActions::default();
         let mut dedupe = HashSet::<(String, String)>::new();
         let incoming_key = cache_key(incoming);
         let incoming_destinations = sorted_unique_addresses(&incoming.header);
@@ -1496,9 +1495,10 @@ impl<O: CompressionOracle> Router<O> {
                     now,
                     ForwardReason::CompensatoryReply,
                 );
-                if !actions.is_empty() {
+                if !actions.forwards.is_empty() {
                     dedupe.insert(dedupe_key);
-                    out.extend(actions);
+                    out.forwards.extend(actions.forwards);
+                    out.client_plans.extend(actions.client_plans);
                 }
             }
         }
@@ -1521,9 +1521,10 @@ impl<O: CompressionOracle> Router<O> {
                     now,
                     ForwardReason::MatchedForwardIncoming,
                 );
-                if !actions.is_empty() {
+                if !actions.forwards.is_empty() {
                     dedupe.insert(dedupe_key);
-                    out.extend(actions);
+                    out.forwards.extend(actions.forwards);
+                    out.client_plans.extend(actions.client_plans);
                 }
             }
 
@@ -1542,9 +1543,10 @@ impl<O: CompressionOracle> Router<O> {
                     now,
                     ForwardReason::MatchedForwardCached,
                 );
-                if !actions.is_empty() {
+                if !actions.forwards.is_empty() {
                     dedupe.insert(dedupe_key);
-                    out.extend(actions);
+                    out.forwards.extend(actions.forwards);
+                    out.client_plans.extend(actions.client_plans);
                 }
             }
         }
@@ -1558,36 +1560,37 @@ impl<O: CompressionOracle> Router<O> {
         destination: &str,
         now: &CmrTimestamp,
         reason: ForwardReason,
-    ) -> Vec<ForwardAction> {
+    ) -> RoutingActions {
         if destination == self.local_address
             || !self.can_forward_to_peer(destination)
             || message_contains_sender(message, destination)
         {
-            return Vec::new();
+            return RoutingActions::default();
         }
 
-        let mut out = Vec::with_capacity(2);
+        let mut out = RoutingActions::default();
         if !self.shared_keys.contains_key(destination)
             && !self.pending_rsa.contains_key(destination)
             && !self.pending_dh.contains_key(destination)
         {
             let kx = match self.policy.trust.auto_key_exchange_mode {
-                AutoKeyExchangeMode::Rsa => self.build_rsa_initiation(destination, now),
-                AutoKeyExchangeMode::Dh => self.build_dh_initiation(destination, now),
+                AutoKeyExchangeMode::Rsa => self.build_rsa_initiation_plan(destination, now),
+                AutoKeyExchangeMode::Dh => self.build_dh_initiation_plan(destination, now),
             };
-            if let Some(action) = kx {
-                out.push(action);
+            if let Some(plan) = kx {
+                out.client_plans.push(plan);
             }
         }
-        out.push(self.wrap_and_forward(message, destination, now, reason));
+        out.forwards
+            .push(self.wrap_and_forward(message, destination, now, reason));
         out
     }
 
-    fn build_rsa_initiation(
+    fn build_rsa_initiation_plan(
         &mut self,
         destination: &str,
-        now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
+        _now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
         let e = BigUint::from(65_537_u32);
         let bits_each = usize::try_from(MIN_RSA_MODULUS_BITS / 2).ok()?;
         let mut generated = None;
@@ -1624,27 +1627,19 @@ impl<O: CompressionOracle> Router<O> {
         let body = KeyExchangeMessage::RsaRequest { n, e }
             .render()
             .into_bytes();
-        let msg = CmrMessage {
-            signature: Signature::Unsigned,
-            header: vec![MessageId {
-                timestamp: self.next_forward_timestamp(now, None),
-                address: self.local_address.clone(),
-            }],
-            body,
-        };
-        self.cache.insert(msg.clone());
-        Some(ForwardAction {
+        Some(ClientMessagePlan {
             destination: destination.to_owned(),
-            message_bytes: msg.to_bytes(),
+            body,
+            signing_key: None,
             reason: ForwardReason::KeyExchangeInitiation,
         })
     }
 
-    fn build_dh_initiation(
+    fn build_dh_initiation_plan(
         &mut self,
         destination: &str,
-        now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
+        _now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
         let bits = usize::try_from(MIN_DH_MODULUS_BITS).ok()?;
         let p = generate_probable_safe_prime(bits, 10)?;
         let g = find_primitive_root_for_safe_prime(&p)?;
@@ -1661,18 +1656,10 @@ impl<O: CompressionOracle> Router<O> {
         let body = KeyExchangeMessage::DhRequest { g, p, a_pub }
             .render()
             .into_bytes();
-        let msg = CmrMessage {
-            signature: Signature::Unsigned,
-            header: vec![MessageId {
-                timestamp: self.next_forward_timestamp(now, None),
-                address: self.local_address.clone(),
-            }],
-            body,
-        };
-        self.cache.insert(msg.clone());
-        Some(ForwardAction {
+        Some(ClientMessagePlan {
             destination: destination.to_owned(),
-            message_bytes: msg.to_bytes(),
+            body,
+            signing_key: None,
             reason: ForwardReason::KeyExchangeInitiation,
         })
     }
