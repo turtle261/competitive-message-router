@@ -109,18 +109,8 @@ impl MessageCache {
     }
 
     fn evict_as_needed(&mut self) {
-        while self.entries.len() > self.max_messages || self.total_bytes > self.max_bytes {
-            let Some(key) = self.order.pop_front() else {
-                break;
-            };
-            let Some(entry) = self.entries.remove(&key) else {
-                continue;
-            };
-            self.total_bytes = self.total_bytes.saturating_sub(entry.encoded_size);
-            self.remove_message_ids(&entry.message);
-            debug_assert_eq!(entry.key, key);
-            self.total_evictions = self.total_evictions.saturating_add(1);
-        }
+        // AGI2 message-pool semantics: once posted, messages are retained.
+        // Capacity limits remain for observability fields but do not evict content.
     }
 
     fn add_message_ids(&mut self, message: &CmrMessage) {
@@ -518,26 +508,17 @@ pub struct Router<O: CompressionOracle> {
 }
 
 impl<O: CompressionOracle> Router<O> {
-    fn normalized_threshold_override(&self) -> Option<f64> {
-        let value = self
-            .policy
-            .spam
-            .max_match_distance_normalized
-            .clamp(0.0, 1.0);
-        (value < 1.0).then_some(value)
-    }
-
     fn normalized_match_distance(
         &self,
         raw_distance: f64,
         incoming_len: usize,
-        peer_corpus_len: usize,
+        _peer_corpus_len: usize,
     ) -> Option<f64> {
         if !raw_distance.is_finite() {
             return None;
         }
         let bounded = raw_distance.max(0.0);
-        let scale = incoming_len.saturating_add(peer_corpus_len).max(1) as f64;
+        let scale = incoming_len.max(1) as f64;
         Some((bounded / scale).clamp(0.0, 1.0))
     }
 
@@ -1227,10 +1208,9 @@ impl<O: CompressionOracle> Router<O> {
         &self,
         incoming: &CmrMessage,
     ) -> Result<RoutingDecision, ProcessError> {
-        let normalized_override = self.normalized_threshold_override();
         let threshold_raw = self.policy.spam.max_match_distance;
-        let threshold_normalized = normalized_override.unwrap_or(1.0);
-        let use_normalized_threshold = normalized_override.is_some();
+        let threshold_normalized = 1.0;
+        let use_normalized_threshold = false;
         let mut decision = RoutingDecision {
             best_peer: None,
             best_distance_raw: None,
@@ -1242,54 +1222,43 @@ impl<O: CompressionOracle> Router<O> {
             compensatory: None,
         };
 
-        let candidates = self.collect_match_candidates();
-        if candidates.is_empty() {
+        let peer_corpora = self.collect_peer_corpora();
+        if peer_corpora.is_empty() {
             return Ok(decision);
         }
 
         let mut canonical_incoming = incoming.clone();
         canonical_incoming.make_unsigned();
         let incoming_bytes = canonical_incoming.to_bytes();
-        let candidate_bytes: Vec<Vec<u8>> = candidates
-            .iter()
-            .map(|entry| entry.message.to_bytes())
-            .collect();
+        let mut peers: Vec<(&String, &Vec<u8>)> = peer_corpora.iter().collect();
+        peers.sort_by(|left, right| left.0.cmp(right.0));
+        let peer_names: Vec<String> = peers.iter().map(|(peer, _)| (*peer).to_owned()).collect();
+        let corpora: Vec<Vec<u8>> = peers.iter().map(|(_, corpus)| (*corpus).clone()).collect();
         let distances = self
             .oracle
-            .batch_compression_distance(&incoming_bytes, &candidate_bytes)
+            .batch_compression_distance(&incoming_bytes, &corpora)
             .map_err(ProcessError::Compression)?;
 
         let mut best: Option<(String, f64, usize)> = None;
-        let mut matched_messages = Vec::<CmrMessage>::new();
+        let mut matched_peers = Vec::<String>::new();
         let incoming_len = incoming_bytes.len();
-        for ((entry, candidate), distance) in candidates
-            .iter()
-            .zip(candidate_bytes.iter())
+        for ((peer, corpus), distance) in peer_names
+            .into_iter()
+            .zip(corpora.iter())
             .zip(distances.into_iter())
         {
             if !distance.is_finite() {
                 continue;
             }
-            let normalized = self
-                .normalized_match_distance(distance, incoming_len, candidate.len())
-                .unwrap_or(1.0);
-            let passed_threshold = if let Some(normalized_threshold) = normalized_override {
-                normalized <= normalized_threshold
-            } else {
-                distance <= threshold_raw
-            };
+            let passed_threshold = distance <= threshold_raw;
             if passed_threshold {
-                matched_messages.push(entry.message.clone());
+                matched_peers.push(peer.clone());
             }
             if best
                 .as_ref()
                 .is_none_or(|(_, best_distance, _)| distance < *best_distance)
             {
-                best = Some((
-                    entry.message.immediate_sender().to_owned(),
-                    distance,
-                    candidate.len(),
-                ));
+                best = Some((peer, distance, corpus.len()));
             }
         }
 
@@ -1305,17 +1274,17 @@ impl<O: CompressionOracle> Router<O> {
         decision.best_distance_raw = Some(best_distance);
         decision.best_distance_normalized = Some(best_normalized);
 
-        let passes_best_threshold = if let Some(normalized_threshold) = normalized_override {
-            best_normalized <= normalized_threshold
-        } else {
-            best_distance <= threshold_raw
-        };
-        if !passes_best_threshold || matched_messages.is_empty() {
+        let passes_best_threshold = best_distance <= threshold_raw;
+        if !passes_best_threshold || matched_peers.is_empty() {
+            return Ok(decision);
+        }
+
+        let matched_messages = self.select_matched_messages(&matched_peers);
+        if matched_messages.is_empty() {
             return Ok(decision);
         }
 
         let compensatory = if message_contains_sender(incoming, &best_peer) {
-            let peer_corpora = self.collect_peer_corpora();
             self.select_compensatory_message(incoming, &best_peer, &peer_corpora)?
                 .map(|message| (best_peer.clone(), message))
         } else {
@@ -1337,9 +1306,6 @@ impl<O: CompressionOracle> Router<O> {
                 continue;
             }
             let sender = entry.message.immediate_sender();
-            if sender == self.local_address.as_str() {
-                continue;
-            }
             peer_corpora
                 .entry(sender.to_owned())
                 .or_default()
@@ -1348,12 +1314,18 @@ impl<O: CompressionOracle> Router<O> {
         peer_corpora
     }
 
-    fn collect_match_candidates(&self) -> Vec<&CacheEntry> {
+    fn select_matched_messages(&self, matched_peers: &[String]) -> Vec<CmrMessage> {
+        let matched = matched_peers
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         self.cache
             .order
             .iter()
             .filter_map(|key| self.cache.entries.get(key))
             .filter(|entry| !is_key_exchange_control_message(&entry.message))
+            .filter(|entry| matched.contains(entry.message.immediate_sender()))
+            .map(|entry| entry.message.clone())
             .collect()
     }
 

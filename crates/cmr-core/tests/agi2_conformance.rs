@@ -115,7 +115,7 @@ fn appendix_a2_signature_v1_is_hmac_sha256_of_payload() {
 }
 
 #[test]
-fn appendix_a3_matching_is_per_message_not_peer_blob_fanout() {
+fn appendix_a3_peer_corpus_match_routes_using_peer_history() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
     let mut router = Router::new("http://local/".to_owned(), policy, MarkerOracle);
@@ -148,14 +148,14 @@ fn appendix_a3_matching_is_per_message_not_peer_blob_fanout() {
     let incoming = message_with_sender("http://origin/", b"question", None, "2029/12/31 23:59:55");
     let out = router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
     assert!(out.accepted);
-    assert_eq!(out.matched_count, 1);
+    assert_eq!(out.matched_count, 2);
     assert!(
         out.forwards
             .iter()
             .any(|forward| forward.destination == "http://dest-near/")
     );
     assert!(
-        !out.forwards
+        out.forwards
             .iter()
             .any(|forward| forward.destination == "http://dest-far/")
     );

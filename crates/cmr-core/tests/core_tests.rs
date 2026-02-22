@@ -1053,7 +1053,7 @@ fn router_match_threshold_one_effectively_disables_filtering() {
 }
 
 #[test]
-fn router_uses_normalized_override_when_below_one() {
+fn router_match_threshold_uses_raw_distance_even_when_normalized_override_set() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.0;
     policy.spam.max_match_distance_normalized = 1.0;
@@ -1082,9 +1082,9 @@ fn router_uses_normalized_override_when_below_one() {
             .process_incoming(&seed, TransportKind::Http, ts("2030/01/01 00:00:10"))
             .accepted
     );
-    let normalized_mode =
+    let override_set =
         router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
-    assert!(normalized_mode.matched_count >= 1);
+    assert_eq!(override_set.matched_count, 0);
 }
 
 #[derive(Clone)]
