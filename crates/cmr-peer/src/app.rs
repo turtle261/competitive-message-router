@@ -113,6 +113,9 @@ pub struct ComposeResult {
     pub destination: String,
     pub body_bytes: usize,
     pub signed: bool,
+    pub sign_requested: bool,
+    pub signed_destinations: Vec<String>,
+    pub unsigned_requested_destinations: Vec<String>,
     pub local_only: bool,
     pub local_only_reason: Option<String>,
     pub seed_destinations: Vec<String>,
@@ -132,6 +135,7 @@ pub struct ComposeDeliveryResult {
     pub destination: String,
     pub transport_sent: bool,
     pub transport_error: Option<String>,
+    pub signature_applied: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,6 +150,12 @@ pub struct ComposeMatchedMessage {
 struct LocalInjectResult {
     event: DashboardEvent,
     returned_matches: Vec<ComposeMatchedMessage>,
+}
+
+#[derive(Clone, Debug)]
+struct RenderedPayload {
+    bytes: Vec<u8>,
+    signature_applied: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -362,7 +372,7 @@ impl AppState {
         let payload = self.render_ui_payload_for_destination(&message, destination, sign)?;
         match tokio::time::timeout(
             OUTBOUND_SEND_TIMEOUT,
-            self.transport.send_message(destination, &payload),
+            self.transport.send_message(destination, &payload.bytes),
         )
         .await
         {
@@ -578,23 +588,36 @@ impl AppState {
         }
 
         let mut deliveries = Vec::with_capacity(unique_destinations.len());
+        let mut signed_destinations = Vec::new();
+        let mut unsigned_requested_destinations = Vec::new();
         if !self.transport_enabled() {
             let detail =
                 "transport plane is disabled (enable transport for outbound delivery)".to_owned();
             for peer in &unique_destinations {
+                let rendered = self.render_ui_payload_for_destination(&message, peer, sign)?;
+                if rendered.signature_applied {
+                    signed_destinations.push(peer.clone());
+                } else if sign {
+                    unsigned_requested_destinations.push(peer.clone());
+                }
                 deliveries.push(ComposeDeliveryResult {
                     destination: peer.clone(),
                     transport_sent: false,
                     transport_error: Some(detail.clone()),
+                    signature_applied: rendered.signature_applied,
                 });
             }
         } else {
             for peer in &unique_destinations {
-                let delivery_payload =
-                    self.render_ui_payload_for_destination(&message, peer, sign)?;
+                let rendered = self.render_ui_payload_for_destination(&message, peer, sign)?;
+                if rendered.signature_applied {
+                    signed_destinations.push(peer.clone());
+                } else if sign {
+                    unsigned_requested_destinations.push(peer.clone());
+                }
                 let result = match tokio::time::timeout(
                     OUTBOUND_SEND_TIMEOUT,
-                    self.transport.send_message(peer, &delivery_payload),
+                    self.transport.send_message(peer, &rendered.bytes),
                 )
                 .await
                 {
@@ -602,11 +625,13 @@ impl AppState {
                         destination: peer.clone(),
                         transport_sent: true,
                         transport_error: None,
+                        signature_applied: rendered.signature_applied,
                     },
                     Ok(Err(err)) => ComposeDeliveryResult {
                         destination: peer.clone(),
                         transport_sent: false,
                         transport_error: Some(err.to_string()),
+                        signature_applied: rendered.signature_applied,
                     },
                     Err(_) => ComposeDeliveryResult {
                         destination: peer.clone(),
@@ -615,6 +640,7 @@ impl AppState {
                             "send timed out after {}s",
                             OUTBOUND_SEND_TIMEOUT.as_secs()
                         )),
+                        signature_applied: rendered.signature_applied,
                     },
                 };
                 deliveries.push(result);
@@ -655,6 +681,7 @@ impl AppState {
                     transport_error: Some(
                         "primary destination missing from delivery set".to_owned(),
                     ),
+                    signature_applied: false,
                 })
         } else {
             let destination = unique_destinations.first().cloned().unwrap_or_default();
@@ -671,6 +698,7 @@ impl AppState {
                 destination,
                 transport_sent,
                 transport_error,
+                signature_applied: false,
             }
         };
         Ok(ComposeResult {
@@ -679,7 +707,10 @@ impl AppState {
             resolved_destinations: unique_destinations,
             destination: primary_delivery.destination.clone(),
             body_bytes: payload.len(),
-            signed: sign,
+            signed: sign && unsigned_requested_destinations.is_empty(),
+            sign_requested: sign,
+            signed_destinations,
+            unsigned_requested_destinations,
             local_only,
             local_only_reason,
             seed_destinations,
@@ -970,7 +1001,7 @@ impl AppState {
         base_message: &CmrMessage,
         destination: &str,
         sign: bool,
-    ) -> Result<Vec<u8>, AppError> {
+    ) -> Result<RenderedPayload, AppError> {
         let mut message = base_message.clone();
         message.make_unsigned();
         let guard = self
@@ -978,10 +1009,15 @@ impl AppState {
             .lock()
             .map_err(|_| AppError::Runtime("router mutex poisoned".to_owned()))?;
         let should_sign = sign || guard.policy().trust.require_signatures_from_known_peers;
+        let mut signature_applied = false;
         if should_sign && let Some(key) = guard.shared_key(destination) {
             message.sign_with_key(key);
+            signature_applied = true;
         }
-        Ok(message.to_bytes())
+        Ok(RenderedPayload {
+            bytes: message.to_bytes(),
+            signature_applied,
+        })
     }
 
     fn render_client_plan_payload(&self, plan: &ClientMessagePlan) -> Result<Vec<u8>, AppError> {

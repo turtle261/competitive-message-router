@@ -1705,6 +1705,8 @@
             <div class="row">
               ${state.composeResult.local_only ? '<span class="pill warn">local only</span>' : (state.composeResult.transport_sent ? '<span class="pill good">transport delivered</span>' : '<span class="pill warn">transport not delivered</span>')}
               <span class="pill good">local accepted</span>
+              <span class="pill">${state.composeResult.sign_requested ? "sign requested" : "unsigned requested"}</span>
+              <span class="pill">${(state.composeResult.signed_destinations || []).length} signed / ${(state.composeResult.unsigned_requested_destinations || []).length} unsigned-requested</span>
               <span class="pill">bytes ${state.composeResult.body_bytes}</span>
               <span class="pill">${state.composeResult.transport_sent_count || 0} sent / ${state.composeResult.transport_failed_count || 0} failed</span>
               <span class="pill">${state.composeResult.seed_sent_count || 0} seed sent / ${state.composeResult.seed_failed_count || 0} seed failed</span>
@@ -1712,6 +1714,9 @@
             </div>
             ${state.composeResult.local_only_reason ? `<div class="callout warn space">${escapeHtml(state.composeResult.local_only_reason)}</div>` : ""}
             ${state.composeResult.transport_error ? `<div class="callout warn space">Transport detail: ${escapeHtml(state.composeResult.transport_error)}</div>` : ""}
+            ${(Array.isArray(state.composeResult.unsigned_requested_destinations) && state.composeResult.unsigned_requested_destinations.length)
+              ? `<div class="callout warn space">Sign was requested, but no shared key exists for: ${escapeHtml(state.composeResult.unsigned_requested_destinations.join(", "))}</div>`
+              : ""}
 
             <div class="table-wrap space">
               <table>

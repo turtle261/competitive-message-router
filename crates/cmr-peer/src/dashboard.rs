@@ -622,7 +622,7 @@ pub(crate) async fn handle_dashboard_request(
                         StatusCode::OK,
                         serde_json::json!({
                             "destination": destination,
-                            "signed": payload.sign,
+                            "sign_requested": payload.sign,
                             "body_bytes": body_len,
                         }),
                     ),
