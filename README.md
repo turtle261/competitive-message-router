@@ -34,7 +34,7 @@ This project implements the CMR protocol defined in `agi2.html` as a Rust worksp
   - UDP service-tag framing (`udp://host:port/service`) enforced on send/receive.
   - SMTP payloads are sent as `application/octet-stream` with base64 transfer encoding.
 - Key exchange control messages:
-  - Automatic first-contact key-exchange initiation for unknown peers (RSA or DH, policy-selectable).
+  - Automatic first-contact key-exchange planning for unknown peers (RSA or DH, policy-selectable). The router emits `ClientMessagePlan`; the peer daemon client layer creates/sends the wire message.
   - RSA request/reply.
   - Diffie-Hellman request/reply.
   - Clear key exchange (only accepted over secure transport).
@@ -76,7 +76,7 @@ cmr-peer run --config cmr-peer.toml
 4. Optional local smoke test:
 
 ```bash
-cmr-peer self-test --config cmr-peer.toml --spawn-runtime true
+cmr-peer self-test --config cmr-peer.toml --spawn-runtime
 ```
 
 5. Optional SSH forced-command mode (ingest one message from stdin):
@@ -135,7 +135,7 @@ CI runs a full platform matrix (Linux GNU + musl, macOS, Windows, FreeBSD/OpenBS
 ```bash
 cargo run -p cmr-peer -- init-config --config cmr-peer.toml
 cargo run -p cmr-peer -- run --config cmr-peer.toml
-cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime true
+cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime
 ```
 
 ### Optional TUI
@@ -159,6 +159,12 @@ The terminal dashboard provides high-level controls:
 - For HTTPS listener, provide PEM cert/key paths in config.
 - Use pairwise unique shared keys per peer.
 - Mahoney's V2.2 paper seemingly includes an error suggesting insecure raw SHA256 usage. We do not implement that error. We use `HMAC-SHA256` for message authentication (not raw `SHA256(key || message)`), and `HKDF-SHA256` to derive keys from RSA/DH shared secrets.
+
+## A1 Role Boundary
+
+- Router forwarding stays A1-pure: it forwards existing messages and does not emit newly constructed wire messages.
+- When protocol control traffic is needed (for example first-contact key exchange), the router emits a `ClientMessagePlan` and the peer daemon client layer (`send_client_plan`) materializes/sends it.
+- Extensibility: alternate clients can consume `ClientMessagePlan` and apply custom send scheduling/retry/transport policy without changing core router semantics.
 
 
 ## TODO
