@@ -1140,7 +1140,7 @@ fn router_uses_compression_distance_metric_for_matching() {
 }
 
 #[test]
-fn router_match_threshold_is_normalized_and_size_aware() {
+fn router_match_threshold_rejects_raw_distance_above_limit() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.0;
     policy.trust.max_outbound_inbound_ratio = 10.0;
