@@ -23,5 +23,7 @@ default_remote_command = "cmr-peer receive-stdin --config /etc/cmr-peer.toml --t
 [policy_tuning]
 
 [dashboard]
-enabled = true
+enabled = false
 path = "/_cmr"
+# auth_username = "operator"
+# auth_password = "change-me"

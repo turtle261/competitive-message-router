@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
+use base64::Engine as _;
 use bytes::Bytes;
 use cmr_core::policy::{RoutingPolicy, SecurityLevel};
 use http::StatusCode;
@@ -22,6 +23,7 @@ use crate::app::{AppError, AppState, DashboardEvent, EditableConfigPayload, Peer
 use crate::config::DashboardConfig;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
+const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct ApiEnvelope<T: Serialize> {
@@ -172,13 +174,32 @@ pub(crate) async fn handle_dashboard_request(
     req: Request<Incoming>,
     state: AppState,
     cfg: DashboardConfig,
+    is_https: bool,
+    remote_ip: Option<std::net::IpAddr>,
 ) -> Result<Response<PeerBody>, Infallible> {
+    if !dashboard_transport_allowed(is_https, remote_ip) {
+        return Ok(response_api_error(
+            StatusCode::FORBIDDEN,
+            "https_required",
+            "dashboard requires HTTPS for non-localhost access",
+            None,
+        ));
+    }
+
     let query = parse_query(req.uri().query().unwrap_or_default());
+    if !dashboard_auth_is_configured(&cfg) {
+        return Ok(response_api_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "dashboard authentication is required and must be configured",
+            None,
+        ));
+    }
     if !is_authorized(&req, &cfg, &query) {
         return Ok(response_api_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "missing or invalid bearer token",
+            "missing or invalid basic authorization",
             None,
         ));
     }
@@ -1075,15 +1096,31 @@ fn event_to_sse_bytes(event: DashboardEvent) -> Bytes {
 async fn parse_json_body<T: DeserializeOwned>(
     req: Request<Incoming>,
 ) -> Result<T, Response<PeerBody>> {
-    let body = req.into_body().collect().await.map_err(|err| {
-        response_api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_body",
-            "failed to read request body",
-            Some(serde_json::json!({"io_error": err.to_string()})),
-        )
-    })?;
-    serde_json::from_slice::<T>(&body.to_bytes()).map_err(|err| {
+    let mut body = req.into_body();
+    let mut out = Vec::new();
+    while let Some(frame_result) = body.frame().await {
+        let frame = frame_result.map_err(|err| {
+            response_api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                "failed to read request body",
+                Some(serde_json::json!({"io_error": err.to_string()})),
+            )
+        })?;
+        if let Ok(chunk) = frame.into_data() {
+            if out.len().saturating_add(chunk.len()) > MAX_JSON_BODY_BYTES {
+                return Err(response_api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    "request body exceeds max JSON size",
+                    Some(serde_json::json!({"max_bytes": MAX_JSON_BODY_BYTES})),
+                ));
+            }
+            out.extend_from_slice(&chunk);
+        }
+    }
+
+    serde_json::from_slice::<T>(&out).map_err(|err| {
         response_api_error(
             StatusCode::BAD_REQUEST,
             "invalid_json",
@@ -1139,13 +1176,16 @@ fn canonicalize_operator_url(raw: &str) -> Result<String, String> {
 fn is_authorized(
     req: &Request<Incoming>,
     cfg: &DashboardConfig,
-    query: &HashMap<String, String>,
+    _query: &HashMap<String, String>,
 ) -> bool {
-    let Some(expected) = cfg.auth_token.as_deref() else {
-        return true;
+    let Some(expected_user) = cfg.auth_username.as_deref().map(str::trim) else {
+        return false;
     };
-    if query.get("token").is_some_and(|value| value == expected) {
-        return true;
+    let Some(expected_password) = cfg.auth_password.as_deref().map(str::trim) else {
+        return false;
+    };
+    if expected_user.is_empty() || expected_password.is_empty() {
+        return false;
     }
     let Some(value) = req.headers().get("authorization") else {
         return false;
@@ -1153,7 +1193,42 @@ fn is_authorized(
     let Ok(text) = value.to_str() else {
         return false;
     };
-    text == format!("Bearer {expected}")
+    let Some((user, password)) = parse_basic_authorization_header(text) else {
+        return false;
+    };
+    user == expected_user && password == expected_password
+}
+
+fn parse_basic_authorization_header(value: &str) -> Option<(String, String)> {
+    let trimmed = value.trim();
+    let (scheme, encoded) = trimmed.split_once(char::is_whitespace)?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (username, password) = text.split_once(':')?;
+    Some((username.to_owned(), password.to_owned()))
+}
+
+fn dashboard_auth_is_configured(cfg: &DashboardConfig) -> bool {
+    let username = cfg
+        .auth_username
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    let password = cfg
+        .auth_password
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    !username.is_empty() && !password.is_empty()
+}
+
+fn dashboard_transport_allowed(is_https: bool, remote_ip: Option<std::net::IpAddr>) -> bool {
+    is_https || remote_ip.is_some_and(|ip| ip.is_loopback())
 }
 
 fn percent_decode(input: &str) -> Result<String, String> {
@@ -1250,8 +1325,9 @@ fn response_api<T: Serialize>(status: StatusCode, value: ApiEnvelope<T>) -> Resp
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_operator_url, format_probe_failure, normalize_base_path, response_api_error,
-        transport_error_hint,
+        canonicalize_operator_url, dashboard_auth_is_configured, dashboard_transport_allowed,
+        format_probe_failure, normalize_base_path, parse_basic_authorization_header,
+        response_api_error, transport_error_hint,
     };
     use http::StatusCode;
     use http_body_util::BodyExt;
@@ -1305,6 +1381,40 @@ mod tests {
         );
         assert!(hint.is_some());
         assert!(hint.unwrap_or_default().contains("ingest path"));
+    }
+
+    #[test]
+    fn parse_basic_authorization_header_accepts_case_insensitive_scheme() {
+        let parsed = parse_basic_authorization_header("bAsIc dXNlcjpwYXNz").expect("basic auth");
+        assert_eq!(parsed.0, "user");
+        assert_eq!(parsed.1, "pass");
+    }
+
+    #[test]
+    fn dashboard_auth_configuration_requires_non_empty_username_and_password() {
+        let mut cfg = crate::config::DashboardConfig::default();
+        assert!(!dashboard_auth_is_configured(&cfg));
+
+        cfg.auth_username = Some("operator".to_owned());
+        assert!(!dashboard_auth_is_configured(&cfg));
+
+        cfg.auth_password = Some("secret".to_owned());
+        assert!(dashboard_auth_is_configured(&cfg));
+    }
+
+    #[test]
+    fn dashboard_transport_allows_https_or_loopback_http_only() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        assert!(dashboard_transport_allowed(true, None));
+        assert!(dashboard_transport_allowed(
+            false,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        ));
+        assert!(!dashboard_transport_allowed(
+            false,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)))
+        ));
     }
 
     #[tokio::test]

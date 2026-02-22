@@ -52,6 +52,7 @@ const INBOX_MESSAGES_CAP: usize = 1_000;
 const OUTBOUND_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTBOUND_MAX_ATTEMPTS: u32 = 3;
 const OUTBOUND_RETRY_BASE_DELAY_MS: u64 = 120;
+const SMTP_SESSION_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) type PeerBody = BoxBody<Bytes, Infallible>;
 
@@ -1640,7 +1641,12 @@ async fn handle_smtp_session(
 
     loop {
         line.clear();
-        let read = reader.read_line(&mut line).await.map_err(AppError::Io)?;
+        let read = tokio::time::timeout(SMTP_SESSION_READ_TIMEOUT, reader.read_line(&mut line))
+            .await
+            .map_err(|_| {
+                AppError::Runtime("smtp session idle timeout waiting for command".to_owned())
+            })?
+            .map_err(AppError::Io)?;
         if read == 0 {
             break;
         }
@@ -1714,15 +1720,33 @@ async fn handle_smtp_session(
                 .await
                 .map_err(AppError::Io)?;
 
-            let data = match read_smtp_data(&mut reader, max_message_bytes).await {
-                Ok(data) => data,
-                Err(err) => {
+            let data = match tokio::time::timeout(
+                SMTP_SESSION_READ_TIMEOUT,
+                read_smtp_data(&mut reader, max_message_bytes),
+            )
+            .await
+            {
+                Ok(result) => match result {
+                    Ok(data) => data,
+                    Err(err) => {
+                        smtp_write_line(
+                            &mut writer_half,
+                            &format!(
+                                "554 failed to read DATA: {}",
+                                err.to_string().replace('\r', " ")
+                            ),
+                        )
+                        .await
+                        .map_err(AppError::Io)?;
+                        saw_mail_from = false;
+                        saw_rcpt_to = false;
+                        continue;
+                    }
+                },
+                Err(_) => {
                     smtp_write_line(
                         &mut writer_half,
-                        &format!(
-                            "554 failed to read DATA: {}",
-                            err.to_string().replace('\r', " ")
-                        ),
+                        "554 failed to read DATA: smtp session idle timeout",
                     )
                     .await
                     .map_err(AppError::Io)?;
@@ -2047,13 +2071,16 @@ async fn handle_http_request(
     let path = uri.path().to_owned();
 
     if dashboard_cfg.enabled {
-        let base = if dashboard_cfg.path.starts_with('/') {
-            dashboard_cfg.path.clone()
-        } else {
-            format!("/{}", dashboard_cfg.path)
-        };
+        let base = normalize_dashboard_base_path(&dashboard_cfg.path);
         if path == base || path.starts_with(&format!("{base}/")) {
-            return dashboard::handle_dashboard_request(req, state, dashboard_cfg).await;
+            return dashboard::handle_dashboard_request(
+                req,
+                state,
+                dashboard_cfg,
+                is_https,
+                remote_ip,
+            )
+            .await;
         }
     }
 
@@ -2140,6 +2167,16 @@ async fn handle_http_request(
     }
 
     Ok(response(StatusCode::NOT_FOUND, Bytes::new()))
+}
+
+fn normalize_dashboard_base_path(path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        "/".to_owned()
+    } else if path.starts_with('/') {
+        path.trim_end_matches('/').to_owned()
+    } else {
+        format!("/{}", path.trim_end_matches('/'))
+    }
 }
 
 fn response_with_outcome_headers(
@@ -2517,9 +2554,9 @@ mod tests {
 
     use super::{
         ComposeDeliveryResult, compose_primary_delivery_for_ambient,
-        extract_cmr_payload_from_email, loopback_http_target, normalize_ingest_path,
-        read_smtp_data, resolve_ambient_seed_destinations, setup_first_send_ready,
-        validate_handshake_callback_request,
+        extract_cmr_payload_from_email, loopback_http_target, normalize_dashboard_base_path,
+        normalize_ingest_path, read_smtp_data, resolve_ambient_seed_destinations,
+        setup_first_send_ready, validate_handshake_callback_request,
     };
 
     #[test]
@@ -2527,6 +2564,13 @@ mod tests {
         assert_eq!(normalize_ingest_path(""), "/");
         assert_eq!(normalize_ingest_path("/cmr"), "/cmr");
         assert_eq!(normalize_ingest_path("cmr"), "/cmr");
+    }
+
+    #[test]
+    fn normalize_dashboard_path_treats_trailing_slash_consistently() {
+        assert_eq!(normalize_dashboard_base_path("/_cmr"), "/_cmr");
+        assert_eq!(normalize_dashboard_base_path("/_cmr/"), "/_cmr");
+        assert_eq!(normalize_dashboard_base_path("_cmr/"), "/_cmr");
     }
 
     #[test]

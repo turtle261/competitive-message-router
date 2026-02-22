@@ -10,6 +10,7 @@ use rand::RngCore;
 use serde::Serialize;
 use sha2::Sha256;
 use thiserror::Error;
+use url::Url;
 
 use crate::key_exchange::{KeyExchangeError, KeyExchangeMessage, mod_pow, parse_key_exchange};
 use crate::policy::{AutoKeyExchangeMode, RoutingPolicy};
@@ -1029,7 +1030,18 @@ impl<O: CompressionOracle> Router<O> {
     fn is_local_peer_alias(&self, peer: &str) -> bool {
         let local = self.local_address.trim_end_matches('/');
         let candidate = peer.trim_end_matches('/');
-        candidate == local || candidate.starts_with(&format!("{local}/"))
+        if candidate == local {
+            return true;
+        }
+
+        if let (Ok(local_url), Ok(candidate_url)) = (Url::parse(local), Url::parse(candidate)) {
+            if !same_origin(&local_url, &candidate_url) {
+                return false;
+            }
+            return is_path_alias(local_url.path(), candidate_url.path());
+        }
+
+        candidate.starts_with(&format!("{local}/"))
     }
 
     fn record_peer_inbound(&mut self, peer: &str, bytes: usize) {
@@ -1717,6 +1729,28 @@ impl<O: CompressionOracle> Router<O> {
     }
 }
 
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left.host_str().map(|h| h.to_ascii_lowercase())
+            == right.host_str().map(|h| h.to_ascii_lowercase())
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn is_path_alias(local_path: &str, candidate_path: &str) -> bool {
+    let local = normalize_alias_path(local_path);
+    let candidate = normalize_alias_path(candidate_path);
+    candidate == local || candidate.starts_with(&format!("{local}/"))
+}
+
+fn normalize_alias_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 fn split_timestamp_text(input: &str) -> (&str, &str) {
     if let Some((date, fraction)) = input.split_once('.') {
         (date, fraction)
@@ -2239,5 +2273,19 @@ mod tests {
         let newest_existing = CmrTimestamp::parse("2030/01/01 00:00:10.9").expect("existing");
         let forwarded = router.next_forward_timestamp(&now, Some(&newest_existing));
         assert!(forwarded > newest_existing);
+    }
+
+    #[test]
+    fn local_peer_alias_rejects_prefix_collisions() {
+        let policy = RoutingPolicy::default();
+        let router = Router::new("http://peer.example/cmr".to_owned(), policy, StubOracle);
+        assert!(!router.is_local_peer_alias("http://peer.example/cmr-admin"));
+    }
+
+    #[test]
+    fn local_peer_alias_accepts_same_origin_subpath() {
+        let policy = RoutingPolicy::default();
+        let router = Router::new("http://peer.example/cmr".to_owned(), policy, StubOracle);
+        assert!(router.is_local_peer_alias("http://peer.example/cmr/inbox"));
     }
 }

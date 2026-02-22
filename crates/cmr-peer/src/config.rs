@@ -250,9 +250,12 @@ pub struct DashboardConfig {
     /// URL prefix for dashboard and API routes.
     #[serde(default = "default_dashboard_path")]
     pub path: String,
-    /// Optional bearer token for dashboard auth.
+    /// Optional HTTP Basic auth username for dashboard auth.
     #[serde(default)]
-    pub auth_token: Option<String>,
+    pub auth_username: Option<String>,
+    /// Optional HTTP Basic auth password for dashboard auth.
+    #[serde(default)]
+    pub auth_password: Option<String>,
 }
 
 impl Default for DashboardConfig {
@@ -260,7 +263,8 @@ impl Default for DashboardConfig {
         Self {
             enabled: default_dashboard_enabled(),
             path: default_dashboard_path(),
-            auth_token: None,
+            auth_username: None,
+            auth_password: None,
         }
     }
 }
@@ -318,7 +322,7 @@ fn default_ssh_remote_command() -> String {
 }
 
 fn default_dashboard_enabled() -> bool {
-    true
+    false
 }
 
 fn default_dashboard_path() -> String {
