@@ -406,7 +406,7 @@ impl AppState {
             }
         }
         let now = CmrTimestamp::now_utc();
-        let action = {
+        let plan = {
             let mut guard = self
                 .router
                 .lock()
@@ -432,26 +432,10 @@ impl AppState {
             }
         }
         .ok_or_else(|| AppError::Runtime("failed to create key exchange message".to_owned()))?;
-
-        match tokio::time::timeout(
-            OUTBOUND_SEND_TIMEOUT,
-            self.transport
-                .send_message(&action.destination, &action.message_bytes),
-        )
-        .await
-        {
-            Ok(result) => result.map_err(AppError::Transport)?,
-            Err(_) => {
-                return Err(AppError::Runtime(format!(
-                    "key exchange send to {} timed out after {}s",
-                    action.destination,
-                    OUTBOUND_SEND_TIMEOUT.as_secs()
-                )));
-            }
-        }
+        self.send_client_plan(&plan).await?;
 
         self.peer_connect_attempts.fetch_add(1, Ordering::Relaxed);
-        Ok(format!("{:?}", action.reason))
+        Ok(format!("{:?}", plan.reason))
     }
 
     pub(crate) fn reload_policy_from_disk(&self) -> Result<RoutingPolicy, AppError> {

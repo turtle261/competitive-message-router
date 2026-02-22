@@ -11,7 +11,9 @@ use cmr_core::protocol::{
     CmrMessage, CmrTimestamp, MessageId, ParseContext, ParseError, Signature, TransportKind,
     parse_message,
 };
-use cmr_core::router::{CompressionError, CompressionOracle, ForwardReason, ProcessError, Router};
+use cmr_core::router::{
+    ClientMessagePlan, CompressionError, CompressionOracle, ForwardReason, ProcessError, Router,
+};
 use num_bigint::BigUint;
 use proptest::prelude::*;
 
@@ -206,6 +208,21 @@ fn message_with_sender_and_prior_hop(
         ],
         body: body.to_vec(),
     };
+    message.to_bytes()
+}
+
+fn client_plan_wire(sender: &str, timestamp: &str, plan: &ClientMessagePlan) -> Vec<u8> {
+    let mut message = CmrMessage {
+        signature: Signature::Unsigned,
+        header: vec![MessageId {
+            timestamp: ts(timestamp),
+            address: sender.to_owned(),
+        }],
+        body: plan.body.clone(),
+    };
+    if let Some(key) = plan.signing_key.as_deref() {
+        message.sign_with_key(key);
+    }
     message.to_bytes()
 }
 
@@ -549,8 +566,9 @@ fn router_key_exchange_requests_emit_client_message_plan_for_reply() {
     let rsa_request = initiator
         .initiate_rsa_key_exchange("http://local/", &ts("2030/01/01 00:00:00"))
         .expect("valid rsa request");
+    let rsa_request_wire = client_plan_wire("http://peer/", "2029/12/31 23:59:59", &rsa_request);
     let out = router.process_incoming(
-        &rsa_request.message_bytes,
+        &rsa_request_wire,
         TransportKind::Http,
         ts("2030/01/01 00:00:10"),
     );
@@ -1285,9 +1303,8 @@ fn router_for_unknown_destination_initiates_key_exchange_then_forwards_unsigned(
     assert!(matches!(parsed.signature, Signature::Unsigned));
     assert_eq!(parsed.body, b"topic beta");
 
-    assert!(out.forwards.iter().any(|forward| {
-        forward.destination == "http://sink"
-            && forward.reason == ForwardReason::KeyExchangeInitiation
+    assert!(out.client_plans.iter().any(|plan| {
+        plan.destination == "http://sink" && plan.reason == ForwardReason::KeyExchangeInitiation
     }));
 }
 
@@ -1314,9 +1331,8 @@ fn router_for_unknown_destination_auto_key_exchange_respects_policy_mode() {
         forward.destination == "http://sink"
             && forward.reason == ForwardReason::MatchedForwardIncoming
     }));
-    assert!(out.forwards.iter().any(|forward| {
-        forward.destination == "http://sink"
-            && forward.reason == ForwardReason::KeyExchangeInitiation
+    assert!(out.client_plans.iter().any(|plan| {
+        plan.destination == "http://sink" && plan.reason == ForwardReason::KeyExchangeInitiation
     }));
 }
 
