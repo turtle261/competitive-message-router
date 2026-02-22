@@ -223,6 +223,7 @@ version = "0.1.0"
 dependencies = [
  "cmr-core",
  "infotheory",
+ "rayon",
  "serde_json",
 ]
 

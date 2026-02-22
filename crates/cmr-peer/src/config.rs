@@ -41,6 +41,9 @@ pub struct PeerConfig {
     /// Embedded web dashboard settings.
     #[serde(default)]
     pub dashboard: DashboardConfig,
+    /// Ambient compose seed behavior.
+    #[serde(default)]
+    pub ambient: AmbientConfig,
 }
 
 impl PeerConfig {
@@ -65,9 +68,6 @@ impl PeerConfig {
         if let Some(value) = self.policy_tuning.max_match_distance {
             policy.spam.max_match_distance = value.max(0.0);
         }
-        if let Some(value) = self.policy_tuning.max_match_distance_normalized {
-            policy.spam.max_match_distance_normalized = value.clamp(0.0, 1.0);
-        }
         policy
     }
 }
@@ -77,8 +77,26 @@ impl PeerConfig {
 pub struct PolicyTuningConfig {
     /// Optional override for raw Section 3.2 match-distance threshold.
     pub max_match_distance: Option<f64>,
-    /// Optional override for normalized match-distance threshold.
-    pub max_match_distance_normalized: Option<f64>,
+}
+
+/// Ambient compose behavior tuning.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AmbientConfig {
+    /// Static peers used as first-hop seeds for blank-destination compose.
+    #[serde(default)]
+    pub seed_peers: Vec<String>,
+    /// Maximum number of seed peers for ambient compose fanout.
+    #[serde(default = "default_ambient_seed_fanout")]
+    pub seed_fanout: usize,
+}
+
+impl Default for AmbientConfig {
+    fn default() -> Self {
+        Self {
+            seed_peers: Vec::new(),
+            seed_fanout: default_ambient_seed_fanout(),
+        }
+    }
 }
 
 /// Embedded example configuration template.
@@ -305,6 +323,10 @@ fn default_dashboard_enabled() -> bool {
 
 fn default_dashboard_path() -> String {
     "/_cmr".to_owned()
+}
+
+fn default_ambient_seed_fanout() -> usize {
+    8
 }
 
 #[cfg(test)]

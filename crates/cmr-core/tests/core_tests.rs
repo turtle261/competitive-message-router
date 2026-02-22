@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cmr_core::compressor_ipc::{
@@ -19,6 +20,10 @@ struct StubOracle {
     distance: f64,
     fail_intrinsic: bool,
     fail_distance: bool,
+}
+
+struct ChainCountOracle {
+    chain_calls: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +122,38 @@ impl CompressionOracle for StubOracle {
                 .map(|candidate| self.compression_distance(target, candidate))
                 .collect()
         }
+    }
+}
+
+impl CompressionOracle for ChainCountOracle {
+    fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError> {
+        if left == right { Ok(0.0) } else { Ok(0.1) }
+    }
+
+    fn compression_distance_chain(
+        &self,
+        left_parts: &[&[u8]],
+        right_parts: &[&[u8]],
+    ) -> Result<f64, CompressionError> {
+        self.chain_calls.fetch_add(1, Ordering::Relaxed);
+        let left = left_parts.concat();
+        let right = right_parts.concat();
+        self.compression_distance(&left, &right)
+    }
+
+    fn intrinsic_dependence(&self, _data: &[u8], _max_order: i64) -> Result<f64, CompressionError> {
+        Ok(0.9)
+    }
+
+    fn batch_compression_distance(
+        &self,
+        target: &[u8],
+        candidates: &[Vec<u8>],
+    ) -> Result<Vec<f64>, CompressionError> {
+        candidates
+            .iter()
+            .map(|candidate| self.compression_distance(target, candidate))
+            .collect()
     }
 }
 
@@ -627,6 +664,55 @@ fn router_routes_compensatory_message_when_best_peer_already_sent_x() {
 }
 
 #[test]
+fn router_compensatory_path_uses_chunked_distance_without_remainder_materialization() {
+    let mut policy = permissive_policy();
+    policy.spam.max_match_distance = 0.5;
+    policy.trust.max_outbound_inbound_ratio = 10.0;
+    let chain_calls = Arc::new(AtomicUsize::new(0));
+    let oracle = ChainCountOracle {
+        chain_calls: Arc::clone(&chain_calls),
+    };
+    let mut router = Router::new("http://local".to_owned(), policy, oracle);
+
+    let seed_bob = message_with_sender("http://bob", b"topic bob", None, "2029/12/31 23:59:59");
+    let seed_charlie = message_with_sender(
+        "http://charlie",
+        b"charlie payload",
+        None,
+        "2029/12/31 23:59:58",
+    );
+    assert!(
+        router
+            .process_incoming(&seed_bob, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .accepted
+    );
+    assert!(
+        router
+            .process_incoming(
+                &seed_charlie,
+                TransportKind::Http,
+                ts("2030/01/01 00:00:10")
+            )
+            .accepted
+    );
+
+    let incoming_from_bob =
+        message_with_sender("http://bob", b"topic bob", None, "2029/12/31 23:59:57");
+    let out = router.process_incoming(
+        &incoming_from_bob,
+        TransportKind::Http,
+        ts("2030/01/01 00:00:10"),
+    );
+    assert!(out.accepted);
+    assert!(
+        out.forwards
+            .iter()
+            .any(|forward| forward.reason == ForwardReason::CompensatoryReply)
+    );
+    assert!(chain_calls.load(Ordering::Relaxed) > 0);
+}
+
+#[test]
 fn router_spam_binary_and_executable_filters_work() {
     let mut policy = permissive_policy();
     policy.content.allow_binary_payloads = false;
@@ -814,7 +900,6 @@ fn router_matching_forwards_and_resigns_for_known_destination() {
 fn router_jupiter_flow_forwards_cached_answer_back_to_alice_and_bob() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 500.0;
-    policy.spam.max_match_distance_normalized = 1.0;
     policy.trust.max_outbound_inbound_ratio = 10.0;
 
     let mut bob = Router::new("http://bob/".to_owned(), policy.clone(), JupiterOracle);
@@ -968,6 +1053,40 @@ fn router_can_match_messages_inserted_by_local_client_path() {
 }
 
 #[test]
+fn router_local_client_post_returns_matched_messages_to_local_outcome() {
+    let mut policy = permissive_policy();
+    policy.spam.max_match_distance = 0.5;
+    let mut router = Router::new("http://local/".to_owned(), policy, StubOracle::ok(0.9, 0.1));
+
+    let seed = message_with_sender_and_prior_hop(
+        "http://peer/",
+        "http://helper/",
+        b"topic",
+        "2029/12/31 23:59:59",
+        "2029/12/31 23:59:58",
+    );
+    assert!(
+        router
+            .process_incoming(&seed, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .accepted
+    );
+
+    let local_post = b"0\r\n2030/01/01 00:00:00 http://local/\r\n\r\n5\r\ntopic";
+    let out = router.process_local_client_message(
+        local_post,
+        TransportKind::Http,
+        ts("2030/01/01 00:00:11"),
+    );
+    assert!(out.accepted);
+    assert!(!out.local_matches.is_empty());
+    assert!(
+        out.local_matches
+            .iter()
+            .any(|msg| String::from_utf8_lossy(&msg.body) == "topic")
+    );
+}
+
+#[test]
 fn router_uses_compression_distance_metric_for_matching() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
@@ -1027,7 +1146,6 @@ fn router_match_threshold_is_normalized_and_size_aware() {
 fn router_match_threshold_one_effectively_disables_filtering() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 1.0e13;
-    policy.spam.max_match_distance_normalized = 1.0;
     policy.trust.max_outbound_inbound_ratio = 10.0;
     let mut router = Router::new(
         "http://local".to_owned(),
@@ -1053,16 +1171,11 @@ fn router_match_threshold_one_effectively_disables_filtering() {
 }
 
 #[test]
-fn router_match_threshold_uses_raw_distance_even_when_normalized_override_set() {
+fn router_match_threshold_uses_raw_distance_only() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.0;
-    policy.spam.max_match_distance_normalized = 1.0;
     policy.trust.max_outbound_inbound_ratio = 10.0;
-    let mut router = Router::new(
-        "http://local".to_owned(),
-        policy.clone(),
-        StubOracle::ok(0.9, 10.0),
-    );
+    let mut router = Router::new("http://local".to_owned(), policy, StubOracle::ok(0.9, 10.0));
 
     let seed = message_with_sender("http://sink", b"topic alpha", None, "2029/12/31 23:59:59");
     assert!(
@@ -1071,20 +1184,8 @@ fn router_match_threshold_uses_raw_distance_even_when_normalized_override_set() 
             .accepted
     );
     let incoming = message_with_sender("http://origin", b"topic beta", None, "2029/12/31 23:59:58");
-    let raw_mode =
-        router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
-    assert_eq!(raw_mode.matched_count, 0);
-
-    policy.spam.max_match_distance_normalized = 0.5;
-    let mut router = Router::new("http://local".to_owned(), policy, StubOracle::ok(0.9, 10.0));
-    assert!(
-        router
-            .process_incoming(&seed, TransportKind::Http, ts("2030/01/01 00:00:10"))
-            .accepted
-    );
-    let override_set =
-        router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
-    assert_eq!(override_set.matched_count, 0);
+    let out = router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
+    assert_eq!(out.matched_count, 0);
 }
 
 #[derive(Clone)]

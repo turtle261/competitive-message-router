@@ -194,6 +194,31 @@ impl CompressionOracle for CompressorClient {
         }
     }
 
+    fn compression_distance_chain(
+        &self,
+        left_parts: &[&[u8]],
+        right_parts: &[&[u8]],
+    ) -> Result<f64, CompressionError> {
+        let left_parts = left_parts
+            .iter()
+            .map(|part| (*part).to_vec())
+            .collect::<Vec<_>>();
+        let right_parts = right_parts
+            .iter()
+            .map(|part| (*part).to_vec())
+            .collect::<Vec<_>>();
+        match self.request(CompressorRequest::CompressionDistanceChain {
+            left_parts,
+            right_parts,
+        })? {
+            CompressorResponse::CompressionDistance { value } => Ok(value),
+            CompressorResponse::Error { message } => Err(CompressionError::Failed(message)),
+            other => Err(CompressionError::Failed(format!(
+                "unexpected compression distance chain response variant: {other:?}"
+            ))),
+        }
+    }
+
     fn intrinsic_dependence(&self, data: &[u8], max_order: i64) -> Result<f64, CompressionError> {
         match self.request(CompressorRequest::IntrinsicDependence {
             data: data.to_vec(),

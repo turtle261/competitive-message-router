@@ -70,6 +70,21 @@ fn compressor_worker_handles_health_and_metric_requests() {
     assert_eq!(values.len(), 3);
     assert!(values.iter().all(|v| v.is_finite()));
 
+    write_frame(
+        &mut stdin,
+        &CompressorRequest::CompressionDistanceChain {
+            left_parts: vec![b"abc".to_vec(), b"abcabc".to_vec()],
+            right_parts: vec![b"abc".to_vec(), b"xyzabc".to_vec()],
+        },
+    )
+    .expect("send chain distance");
+    let chain: CompressorResponse = read_frame(&mut stdout, 1024 * 1024).expect("read chain");
+    let chain_value = match chain {
+        CompressorResponse::CompressionDistance { value } => value,
+        other => panic!("unexpected response: {other:?}"),
+    };
+    assert!(chain_value.is_finite());
+
     drop(stdin);
     let status = child.wait().expect("wait child");
     assert!(status.success());

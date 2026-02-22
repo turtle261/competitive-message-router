@@ -142,7 +142,29 @@ service = "cmr"
     assert_eq!(cfg.local_address, "http://127.0.0.1:8080/");
     assert_eq!(cfg.listen.http.expect("http").path, "/");
     assert!(policy.content.max_message_bytes > 0);
+    assert_eq!(cfg.ambient.seed_fanout, 8);
+    assert!(cfg.ambient.seed_peers.is_empty());
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn config_policy_tuning_overrides_raw_match_distance() {
+    let toml = r#"
+local_address = "http://127.0.0.1:8080/"
+security_level = "strict"
+prefer_http_handshake = false
+
+[listen]
+[listen.http]
+bind = "127.0.0.1:8080"
+path = "/"
+
+[policy_tuning]
+max_match_distance = 123.0
+"#;
+    let cfg = PeerConfig::from_toml_str(toml).expect("parse config");
+    let policy = cfg.effective_policy();
+    assert_eq!(policy.spam.max_match_distance, 123.0);
 }
 
 #[test]

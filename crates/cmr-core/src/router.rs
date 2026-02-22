@@ -34,6 +34,25 @@ pub trait CompressionOracle: Send + Sync {
     /// CMR Section 3.2 compression distance from spec:
     /// `C(XY)-C(X) + C(YX)-C(Y)`.
     fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError>;
+    /// CMR Section 3.2 compression distance where each side can be provided
+    /// as a sequence of chunks without building contiguous buffers.
+    fn compression_distance_chain(
+        &self,
+        left_parts: &[&[u8]],
+        right_parts: &[&[u8]],
+    ) -> Result<f64, CompressionError> {
+        fn join(parts: &[&[u8]]) -> Vec<u8> {
+            let total = parts.iter().map(|p| p.len()).sum::<usize>();
+            let mut out = Vec::with_capacity(total);
+            for part in parts {
+                out.extend_from_slice(part);
+            }
+            out
+        }
+        let left = join(left_parts);
+        let right = join(right_parts);
+        self.compression_distance(&left, &right)
+    }
     /// Intrinsic dependence.
     fn intrinsic_dependence(&self, data: &[u8], max_order: i64) -> Result<f64, CompressionError>;
     /// Batch CMR distance, defaulting to repeated scalar calls.
@@ -109,8 +128,16 @@ impl MessageCache {
     }
 
     fn evict_as_needed(&mut self) {
-        // AGI2 message-pool semantics: once posted, messages are retained.
-        // Capacity limits remain for observability fields but do not evict content.
+        while self.entries.len() > self.max_messages || self.total_bytes > self.max_bytes {
+            let Some(oldest_key) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest_key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.encoded_size);
+                self.remove_message_ids(&entry.message);
+                self.total_evictions = self.total_evictions.saturating_add(1);
+            }
+        }
     }
 
     fn add_message_ids(&mut self, message: &CmrMessage) {
@@ -327,9 +354,7 @@ struct RoutingDecision {
     best_peer: Option<String>,
     best_distance_raw: Option<f64>,
     best_distance_normalized: Option<f64>,
-    used_normalized_threshold: bool,
     threshold_raw: f64,
-    threshold_normalized: f64,
     matched_messages: Vec<CmrMessage>,
     compensatory: Option<(String, CmrMessage)>,
 }
@@ -438,6 +463,8 @@ pub struct ProcessOutcome {
     pub forwards: Vec<ForwardAction>,
     /// Client-originated message creation plans.
     pub client_plans: Vec<ClientMessagePlan>,
+    /// Matched cached messages returned to a locally originating client post.
+    pub local_matches: Vec<CmrMessage>,
     /// Number of semantic matches found.
     pub matched_count: usize,
     /// Routing distance diagnostics.
@@ -457,10 +484,6 @@ pub struct RoutingDiagnostics {
     pub best_distance_normalized: Option<f64>,
     /// Active raw threshold.
     pub threshold_raw: f64,
-    /// Active normalized threshold value.
-    pub threshold_normalized: f64,
-    /// Whether normalized thresholding was used.
-    pub used_normalized_threshold: bool,
 }
 
 impl ProcessOutcome {
@@ -472,6 +495,7 @@ impl ProcessOutcome {
             intrinsic_dependence: None,
             forwards: Vec::new(),
             client_plans: Vec::new(),
+            local_matches: Vec::new(),
             matched_count: 0,
             routing_diagnostics: None,
             key_exchange_control: false,
@@ -486,6 +510,7 @@ impl ProcessOutcome {
             intrinsic_dependence: None,
             forwards: Vec::new(),
             client_plans: Vec::new(),
+            local_matches: Vec::new(),
             matched_count: 0,
             routing_diagnostics: None,
             key_exchange_control: false,
@@ -508,12 +533,7 @@ pub struct Router<O: CompressionOracle> {
 }
 
 impl<O: CompressionOracle> Router<O> {
-    fn normalized_match_distance(
-        &self,
-        raw_distance: f64,
-        incoming_len: usize,
-        _peer_corpus_len: usize,
-    ) -> Option<f64> {
+    fn normalized_match_distance(&self, raw_distance: f64, incoming_len: usize) -> Option<f64> {
         if !raw_distance.is_finite() {
             return None;
         }
@@ -888,6 +908,7 @@ impl<O: CompressionOracle> Router<O> {
                     intrinsic_dependence: None,
                     forwards: control.forwards,
                     client_plans: control.client_plans,
+                    local_matches: Vec::new(),
                     matched_count: 0,
                     routing_diagnostics: None,
                     key_exchange_control: true,
@@ -940,9 +961,12 @@ impl<O: CompressionOracle> Router<O> {
             best_distance_raw: routing.best_distance_raw,
             best_distance_normalized: routing.best_distance_normalized,
             threshold_raw: routing.threshold_raw,
-            threshold_normalized: routing.threshold_normalized,
-            used_normalized_threshold: routing.used_normalized_threshold,
         });
+        if !enforce_recipient_guard {
+            let mut local_matches = routing.matched_messages.clone();
+            local_matches.truncate(self.policy.throughput.max_forward_actions);
+            outcome.local_matches = local_matches;
+        }
 
         self.cache.insert(parsed.clone());
         self.record_peer_inbound(&sender, raw_message.len());
@@ -970,6 +994,7 @@ impl<O: CompressionOracle> Router<O> {
             intrinsic_dependence: None,
             forwards: Vec::new(),
             client_plans: Vec::new(),
+            local_matches: Vec::new(),
             matched_count: 0,
             routing_diagnostics: None,
             key_exchange_control: false,
@@ -1209,15 +1234,11 @@ impl<O: CompressionOracle> Router<O> {
         incoming: &CmrMessage,
     ) -> Result<RoutingDecision, ProcessError> {
         let threshold_raw = self.policy.spam.max_match_distance;
-        let threshold_normalized = 1.0;
-        let use_normalized_threshold = false;
         let mut decision = RoutingDecision {
             best_peer: None,
             best_distance_raw: None,
             best_distance_normalized: None,
-            used_normalized_threshold: use_normalized_threshold,
             threshold_raw,
-            threshold_normalized,
             matched_messages: Vec::new(),
             compensatory: None,
         };
@@ -1239,10 +1260,10 @@ impl<O: CompressionOracle> Router<O> {
             .batch_compression_distance(&incoming_bytes, &corpora)
             .map_err(ProcessError::Compression)?;
 
-        let mut best: Option<(String, f64, usize)> = None;
+        let mut best: Option<(String, f64)> = None;
         let mut matched_peers = Vec::<String>::new();
         let incoming_len = incoming_bytes.len();
-        for ((peer, corpus), distance) in peer_names
+        for ((peer, _corpus), distance) in peer_names
             .into_iter()
             .zip(corpora.iter())
             .zip(distances.into_iter())
@@ -1256,17 +1277,16 @@ impl<O: CompressionOracle> Router<O> {
             }
             if best
                 .as_ref()
-                .is_none_or(|(_, best_distance, _)| distance < *best_distance)
+                .is_none_or(|(_, best_distance)| distance < *best_distance)
             {
-                best = Some((peer, distance, corpus.len()));
+                best = Some((peer, distance));
             }
         }
 
-        let Some((best_peer, best_distance, best_candidate_len)) = best else {
+        let Some((best_peer, best_distance)) = best else {
             return Ok(decision);
         };
-        let Some(best_normalized) =
-            self.normalized_match_distance(best_distance, incoming_len, best_candidate_len)
+        let Some(best_normalized) = self.normalized_match_distance(best_distance, incoming_len)
         else {
             return Ok(decision);
         };
@@ -1279,7 +1299,8 @@ impl<O: CompressionOracle> Router<O> {
             return Ok(decision);
         }
 
-        let matched_messages = self.select_matched_messages(&matched_peers);
+        let matched_messages =
+            self.select_matched_messages(&incoming_bytes, &matched_peers, threshold_raw)?;
         if matched_messages.is_empty() {
             return Ok(decision);
         }
@@ -1314,19 +1335,39 @@ impl<O: CompressionOracle> Router<O> {
         peer_corpora
     }
 
-    fn select_matched_messages(&self, matched_peers: &[String]) -> Vec<CmrMessage> {
+    fn select_matched_messages(
+        &self,
+        incoming_bytes: &[u8],
+        matched_peers: &[String],
+        threshold_raw: f64,
+    ) -> Result<Vec<CmrMessage>, ProcessError> {
         let matched = matched_peers
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        self.cache
-            .order
-            .iter()
-            .filter_map(|key| self.cache.entries.get(key))
-            .filter(|entry| !is_key_exchange_control_message(&entry.message))
-            .filter(|entry| matched.contains(entry.message.immediate_sender()))
-            .map(|entry| entry.message.clone())
-            .collect()
+        let mut out = Vec::new();
+        for key in &self.cache.order {
+            let Some(entry) = self.cache.entries.get(key) else {
+                continue;
+            };
+            if is_key_exchange_control_message(&entry.message) {
+                continue;
+            }
+            if !matched.contains(entry.message.immediate_sender()) {
+                continue;
+            }
+            let mut candidate = entry.message.clone();
+            candidate.make_unsigned();
+            let candidate_bytes = candidate.to_bytes();
+            let distance = self
+                .oracle
+                .compression_distance(incoming_bytes, &candidate_bytes)
+                .map_err(ProcessError::Compression)?;
+            if distance.is_finite() && distance <= threshold_raw {
+                out.push(entry.message.clone());
+            }
+        }
+        Ok(out)
     }
 
     fn select_compensatory_message(
@@ -1354,6 +1395,15 @@ impl<O: CompressionOracle> Router<O> {
             .iter()
             .map(|(_, bytes)| bytes.len())
             .sum::<usize>();
+        let mut cache_blob = Vec::with_capacity(total_bytes);
+        let mut ranges = Vec::with_capacity(encoded_entries.len());
+        for (_, bytes) in &encoded_entries {
+            let start = cache_blob.len();
+            cache_blob.extend_from_slice(bytes);
+            let end = cache_blob.len();
+            ranges.push((start, end));
+        }
+
         let mut canonical_incoming = incoming.clone();
         canonical_incoming.make_unsigned();
         let mut x_guess = Vec::with_capacity(
@@ -1364,6 +1414,16 @@ impl<O: CompressionOracle> Router<O> {
         if let Some(known_from_best_peer) = peer_corpora.get(best_peer) {
             x_guess.extend_from_slice(known_from_best_peer);
         }
+        let guess_distances = self
+            .oracle
+            .batch_compression_distance(
+                &x_guess,
+                &encoded_entries
+                    .iter()
+                    .map(|(_, bytes)| bytes.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(ProcessError::Compression)?;
 
         let mut best_score = f64::NEG_INFINITY;
         let mut best_message = None;
@@ -1374,27 +1434,31 @@ impl<O: CompressionOracle> Router<O> {
             if total_bytes <= candidate_bytes.len() {
                 continue;
             }
-
-            let mut remainder =
-                Vec::with_capacity(total_bytes.saturating_sub(candidate_bytes.len()));
-            for (other_idx, (_, other_bytes)) in encoded_entries.iter().enumerate() {
-                if idx == other_idx {
-                    continue;
-                }
-                remainder.extend_from_slice(other_bytes);
+            let (start, end) = ranges[idx];
+            let mut right_parts: [&[u8]; 2] = [&[][..], &[][..]];
+            let mut right_count = 0;
+            if start > 0 {
+                right_parts[right_count] = &cache_blob[..start];
+                right_count += 1;
             }
-            if remainder.is_empty() {
+            if end < cache_blob.len() {
+                right_parts[right_count] = &cache_blob[end..];
+                right_count += 1;
+            }
+            if right_count == 0 {
                 continue;
             }
 
             let d_cache = self
                 .oracle
-                .compression_distance(candidate_bytes, &remainder)
+                .compression_distance_chain(
+                    &[candidate_bytes.as_slice()],
+                    &right_parts[..right_count],
+                )
                 .map_err(ProcessError::Compression)?;
-            let d_guess = self
-                .oracle
-                .compression_distance(&x_guess, candidate_bytes)
-                .map_err(ProcessError::Compression)?;
+            let Some(d_guess) = guess_distances.get(idx).copied() else {
+                continue;
+            };
             if !d_cache.is_finite() || !d_guess.is_finite() {
                 continue;
             }

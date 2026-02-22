@@ -344,11 +344,11 @@
       ["inbox", "Message Pool"],
       ["routing", "Routing Trace"],
       ["add-peer", "Connect Peer"],
-      ["overview", "Network"],
+      ["overview", "Advanced Operator"],
     ];
 
     const state = {
-      activeTab: "compose",
+      activeTab: "inbox",
       setup: null,
       runtime: null,
       status: null,
@@ -817,6 +817,14 @@
             <label>SSH Remote Command</label>
             <input id="${prefix}_ssh_default_remote_command" value="${escapeHtml(c.ssh_default_remote_command || "cmr-peer receive-stdin")}" />
           </div>
+          <div class="span-3">
+            <label>Ambient Seed Fanout</label>
+            <input id="${prefix}_ambient_seed_fanout" type="number" min="1" max="256" value="${escapeHtml(String(c.ambient_seed_fanout || 8))}" />
+          </div>
+          <div class="span-9">
+            <label>Ambient Seed Peers (one URL per line)</label>
+            <textarea id="${prefix}_ambient_seed_peers" style="min-height:90px">${escapeHtml((Array.isArray(c.ambient_seed_peers) ? c.ambient_seed_peers : []).join("\n"))}</textarea>
+          </div>
         </div>
       `;
       attachEditingWatch(main);
@@ -843,6 +851,11 @@
         ssh_default_remote_command: (document.getElementById(`${prefix}_ssh_default_remote_command`)?.value || "cmr-peer receive-stdin").trim(),
         dashboard_enabled: (document.getElementById(`${prefix}_dashboard_enabled`)?.value || "true") === "true",
         dashboard_path: (document.getElementById(`${prefix}_dashboard_path`)?.value || "/_cmr").trim() || "/_cmr",
+        ambient_seed_fanout: Number(document.getElementById(`${prefix}_ambient_seed_fanout`)?.value || "8"),
+        ambient_seed_peers: (document.getElementById(`${prefix}_ambient_seed_peers`)?.value || "")
+          .split("\n")
+          .map((line) => canonicalizeAddressInput(line))
+          .filter((line) => line.length > 0),
       };
     }
 
@@ -938,7 +951,7 @@
 
           <section class="step span-6">
             <h3>4. First Send</h3>
-            <p class="meta">Destination is optional. Leave it blank to post locally and let CMR routing propagate semantically.</p>
+            <p class="meta">Destination is optional. Leave it blank to post to the local pool and seed to configured ambient peers.</p>
             <label>Destination (optional)</label>
             <input id="wiz_send_dst" value="${escapeHtml(state.setupComposeForm.destination)}" placeholder="blank = nobody in particular, or enter http://127.0.0.1:8081/" />
             <label>Extra destinations (optional, one URL per line)</label>
@@ -1107,7 +1120,7 @@
       const dist = (event.best_distance_raw == null && event.best_distance_normalized == null)
         ? "-"
         : `${event.best_distance_raw ?? "-"} / ${event.best_distance_normalized ?? "-"}`;
-      const threshold = `${event.threshold_mode || "-"} (${event.threshold_raw ?? "-"}, ${event.threshold_normalized ?? "-"})`;
+      const threshold = `${event.threshold_raw ?? "-"}`;
       return `
         <tr ${state.routingFocusId === event.id ? 'style="outline:2px solid #96c9ad"' : ""}>
           <td class="mono">${escapeHtml(event.ts)}</td>
@@ -1454,7 +1467,7 @@
                   <td class="mono">${escapeHtml(String(e.matched_count ?? 0))}</td>
                   <td class="mono">${escapeHtml(textOrDash(e.best_peer))}</td>
                   <td class="mono">${escapeHtml(`${e.best_distance_raw ?? "-"} / ${e.best_distance_normalized ?? "-"}`)}</td>
-                  <td class="mono">${escapeHtml(`${e.threshold_mode || "-"} | ${e.threshold_raw ?? "-"} / ${e.threshold_normalized ?? "-"}`)}</td>
+                  <td class="mono">${escapeHtml(`${e.threshold_raw ?? "-"}`)}</td>
                   <td class="mono">${escapeHtml(summarizeForwards(e.forwards))}</td>
                   <td>
                     <details>
@@ -1674,8 +1687,8 @@
       const main = document.getElementById("main");
       main.innerHTML = `
         <h2>Post To Message Pool</h2>
-        <p class="meta">Type a message to nobody in particular. Leave destination blank to rely on CMR semantic routing.</p>
-        <div class="callout space">CMR is a semantic message pool: posts are routed to related peers and related prior messages come back through routing.</div>
+        <p class="meta">Type a message to nobody in particular. Blank destination seeds to configured peers, then semantic routing continues from there.</p>
+        <div class="callout space">CMR is a semantic message pool: every post is cached locally, and network delivery is shown separately from local acceptance.</div>
 
         <div class="grid space">
           <div class="span-8"><label>Destination (optional)</label><input id="cp_dst" value="${escapeHtml(state.composeDestination)}" placeholder="blank = nobody in particular, or enter http://127.0.0.1:8081/" /></div>
@@ -1690,11 +1703,33 @@
           <h3>Result</h3>
           ${state.composeResult ? `
             <div class="row">
-              ${state.composeResult.transport_sent ? '<span class="pill good">transport delivered</span>' : '<span class="pill warn">transport not delivered</span>'}
+              ${state.composeResult.local_only ? '<span class="pill warn">local only</span>' : (state.composeResult.transport_sent ? '<span class="pill good">transport delivered</span>' : '<span class="pill warn">transport not delivered</span>')}
+              <span class="pill good">local accepted</span>
               <span class="pill">bytes ${state.composeResult.body_bytes}</span>
               <span class="pill">${state.composeResult.transport_sent_count || 0} sent / ${state.composeResult.transport_failed_count || 0} failed</span>
+              <span class="pill">${state.composeResult.seed_sent_count || 0} seed sent / ${state.composeResult.seed_failed_count || 0} seed failed</span>
+              <span class="pill">${Array.isArray(state.composeResult.returned_matches) ? state.composeResult.returned_matches.length : 0} matched return(s)</span>
             </div>
+            ${state.composeResult.local_only_reason ? `<div class="callout warn space">${escapeHtml(state.composeResult.local_only_reason)}</div>` : ""}
             ${state.composeResult.transport_error ? `<div class="callout warn space">Transport detail: ${escapeHtml(state.composeResult.transport_error)}</div>` : ""}
+
+            <div class="table-wrap space">
+              <table>
+                <thead><tr><th>Matched Sender</th><th>Size</th><th>Preview</th></tr></thead>
+                <tbody>
+                  ${(Array.isArray(state.composeResult.returned_matches) && state.composeResult.returned_matches.length)
+                    ? state.composeResult.returned_matches.map((m) => `
+                      <tr>
+                        <td class="mono">${escapeHtml(m.sender || "-")}</td>
+                        <td class="mono">${fmtBytes(m.encoded_size || 0)}</td>
+                        <td>${escapeHtml(m.body_preview || "")}</td>
+                      </tr>
+                    `).join("")
+                    : '<tr><td colspan="3">No matched messages returned for this post.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+
             <div class="table-wrap space">
               <table>
                 <thead><tr><th>Destination</th><th>Status</th><th>Detail</th></tr></thead>
