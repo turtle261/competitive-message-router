@@ -344,11 +344,7 @@
       ["inbox", "Message Pool"],
       ["routing", "Routing Trace"],
       ["add-peer", "Connect Peer"],
-      ["overview", "Overview"],
-      ["peers", "Peers"],
-      ["cache", "Cache"],
-      ["setup", "Setup"],
-      ["config", "Config & Policy"],
+      ["overview", "Network"],
     ];
 
     const state = {
@@ -942,9 +938,9 @@
 
           <section class="step span-6">
             <h3>4. First Send</h3>
-            <p class="meta">Destination is optional. Leave it blank to send to all known peers (ambient mode).</p>
+            <p class="meta">Destination is optional. Leave it blank to post locally and let CMR routing propagate semantically.</p>
             <label>Destination (optional)</label>
-            <input id="wiz_send_dst" value="${escapeHtml(state.setupComposeForm.destination)}" placeholder="blank = all known peers, or enter http://127.0.0.1:8081/" />
+            <input id="wiz_send_dst" value="${escapeHtml(state.setupComposeForm.destination)}" placeholder="blank = nobody in particular, or enter http://127.0.0.1:8081/" />
             <label>Extra destinations (optional, one URL per line)</label>
             <textarea id="wiz_send_extra" style="min-height:90px">${escapeHtml(state.setupComposeForm.extra || "")}</textarea>
             <label>Body</label>
@@ -1678,11 +1674,11 @@
       const main = document.getElementById("main");
       main.innerHTML = `
         <h2>Post To Message Pool</h2>
-        <p class="meta">Type a message to nobody in particular. Leave destination blank for ambient mode (all known peers).</p>
+        <p class="meta">Type a message to nobody in particular. Leave destination blank to rely on CMR semantic routing.</p>
         <div class="callout space">CMR is a semantic message pool: posts are routed to related peers and related prior messages come back through routing.</div>
 
         <div class="grid space">
-          <div class="span-8"><label>Destination (optional)</label><input id="cp_dst" value="${escapeHtml(state.composeDestination)}" placeholder="blank = all known peers, or enter http://127.0.0.1:8081/" /></div>
+          <div class="span-8"><label>Destination (optional)</label><input id="cp_dst" value="${escapeHtml(state.composeDestination)}" placeholder="blank = nobody in particular, or enter http://127.0.0.1:8081/" /></div>
           <div class="span-4"><label>Options</label><label><input id="cp_sign" type="checkbox" ${state.composeSign ? "checked" : ""} style="width:auto" /> Sign if shared key exists</label></div>
           <div class="span-12"><label>Extra destinations (optional, one URL per line)</label><textarea id="cp_extra" style="min-height:90px">${escapeHtml(state.composeExtraDestinations || "")}</textarea></div>
           <div class="span-12"><label>Body</label><textarea id="cp_body">${escapeHtml(state.composeBody || "Hello from CMR.")}</textarea></div>
@@ -1975,7 +1971,7 @@
           if (editingActive()) {
             return;
           }
-          if (["setup", "overview", "inbox", "peers", "cache"].includes(state.activeTab)) {
+          if (["compose", "overview", "inbox", "add-peer"].includes(state.activeTab)) {
             await renderCurrentView();
           }
         } catch (err) {

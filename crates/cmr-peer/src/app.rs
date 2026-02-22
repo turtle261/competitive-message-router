@@ -543,15 +543,6 @@ impl AppState {
             }
         }
 
-        if unique_destinations.is_empty() {
-            unique_destinations = self.known_peer_destinations()?;
-        }
-        if unique_destinations.is_empty() {
-            return Err(AppError::Runtime(
-                "no destinations resolved (provide a destination, connect a peer, or configure static_keys peers)".to_owned(),
-            ));
-        }
-
         let mut deliveries = Vec::with_capacity(unique_destinations.len());
         if !self.transport_enabled() {
             let detail =
@@ -654,7 +645,7 @@ impl AppState {
         payload: Vec<u8>,
     ) -> Result<DashboardEvent, AppError> {
         let (_, event) = self
-            .process_payload(payload, TransportKind::Http, false, false, true)
+            .process_payload(payload, TransportKind::Http, true, false, true)
             .await?;
         Ok(event)
     }
@@ -950,22 +941,6 @@ impl AppState {
             message.sign_with_key(key);
         }
         Ok(message.to_bytes())
-    }
-
-    fn known_peer_destinations(&self) -> Result<Vec<String>, AppError> {
-        let mut peers = self.router_snapshot(|router| {
-            router
-                .peer_snapshots()
-                .into_iter()
-                .map(|snapshot| snapshot.peer)
-                .collect::<Vec<_>>()
-        })?;
-        if let Some(cfg) = self.config_snapshot() {
-            peers.extend(cfg.static_keys.into_iter().map(|entry| entry.peer));
-        }
-        peers.sort();
-        peers.dedup();
-        Ok(peers)
     }
 
     fn record_inbox_message(&self, event: &DashboardEvent, outcome: &ProcessOutcome) {
