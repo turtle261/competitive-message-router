@@ -668,22 +668,12 @@ impl AppState {
                     signature_applied: false,
                 })
         } else {
-            let destination = unique_destinations.first().cloned().unwrap_or_default();
-            let transport_sent = transport_sent_count > 0 || local_only;
-            let transport_error = if transport_sent || local_only {
-                None
-            } else {
-                deliveries
-                    .iter()
-                    .find_map(|item| item.transport_error.clone())
-                    .or_else(|| Some("no destination transport send succeeded".to_owned()))
-            };
-            ComposeDeliveryResult {
-                destination,
-                transport_sent,
-                transport_error,
-                signature_applied: false,
-            }
+            compose_primary_delivery_for_ambient(
+                &unique_destinations,
+                &deliveries,
+                transport_sent_count,
+                local_only,
+            )
         };
         Ok(ComposeResult {
             ambient,
@@ -1124,6 +1114,30 @@ fn compose_matched_message_from_cmr(message: &CmrMessage) -> ComposeMatchedMessa
         encoded_size: message.encoded_len(),
         body_preview: body_text.chars().take(256).collect::<String>(),
         body_text,
+    }
+}
+
+fn compose_primary_delivery_for_ambient(
+    unique_destinations: &[String],
+    deliveries: &[ComposeDeliveryResult],
+    transport_sent_count: usize,
+    local_only: bool,
+) -> ComposeDeliveryResult {
+    let destination = unique_destinations.first().cloned().unwrap_or_default();
+    let transport_sent = transport_sent_count > 0;
+    let transport_error = if transport_sent || local_only {
+        None
+    } else {
+        deliveries
+            .iter()
+            .find_map(|item| item.transport_error.clone())
+            .or_else(|| Some("no destination transport send succeeded".to_owned()))
+    };
+    ComposeDeliveryResult {
+        destination,
+        transport_sent,
+        transport_error,
+        signature_applied: false,
     }
 }
 
@@ -2502,6 +2516,7 @@ mod tests {
     use crate::config::PeerConfig;
 
     use super::{
+        ComposeDeliveryResult, compose_primary_delivery_for_ambient,
         extract_cmr_payload_from_email, loopback_http_target, normalize_ingest_path,
         read_smtp_data, resolve_ambient_seed_destinations, setup_first_send_ready,
         validate_handshake_callback_request,
@@ -2587,6 +2602,30 @@ mod tests {
     fn setup_first_send_ready_requires_transport_success() {
         assert!(!setup_first_send_ready(0));
         assert!(setup_first_send_ready(1));
+    }
+
+    #[test]
+    fn ambient_primary_delivery_local_only_does_not_claim_transport_send() {
+        let result = compose_primary_delivery_for_ambient(&[], &[], 0, true);
+        assert!(!result.transport_sent);
+        assert!(result.transport_error.is_none());
+        assert!(result.destination.is_empty());
+    }
+
+    #[test]
+    fn ambient_primary_delivery_uses_first_error_when_not_local_only() {
+        let deliveries = vec![ComposeDeliveryResult {
+            destination: "http://peer/".to_owned(),
+            transport_sent: false,
+            transport_error: Some("timeout".to_owned()),
+            signature_applied: false,
+        }];
+        let unique_destinations = vec!["http://peer/".to_owned()];
+        let result =
+            compose_primary_delivery_for_ambient(&unique_destinations, &deliveries, 0, false);
+        assert!(!result.transport_sent);
+        assert_eq!(result.transport_error.as_deref(), Some("timeout"));
+        assert_eq!(result.destination, "http://peer/");
     }
 
     #[test]
