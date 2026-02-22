@@ -505,7 +505,10 @@ fn parse_signature_line(line: &str) -> Result<Signature, ParseError> {
 fn validate_header(header: &[MessageId], ctx: &ParseContext<'_>) -> Result<(), ParseError> {
     let mut addresses = std::collections::HashSet::<&str>::with_capacity(header.len());
     for (idx, id) in header.iter().enumerate() {
-        if Some(id.address.as_str()) == ctx.recipient_address {
+        if ctx
+            .recipient_address
+            .is_some_and(|recipient| same_address_alias(id.address.as_str(), recipient))
+        {
             return Err(ParseError::RecipientAddressInHeader);
         }
         if !addresses.insert(id.address.as_str()) {
@@ -519,6 +522,10 @@ fn validate_header(header: &[MessageId], ctx: &ParseContext<'_>) -> Result<(), P
         }
     }
     Ok(())
+}
+
+fn same_address_alias(left: &str, right: &str) -> bool {
+    left == right || left.trim_end_matches('/') == right.trim_end_matches('/')
 }
 
 fn take_crlf_line(mut input: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
@@ -632,6 +639,13 @@ mod tests {
     #[test]
     fn rejects_recipient_in_header() {
         let raw = b"0\r\n2029/12/31 23:59:59 http://bob\r\n\r\n0\r\n";
+        let err = parse_message(raw, &ctx(Some("http://bob"))).expect_err("must fail");
+        assert!(matches!(err, ParseError::RecipientAddressInHeader));
+    }
+
+    #[test]
+    fn rejects_recipient_in_header_when_only_trailing_slash_differs() {
+        let raw = b"0\r\n2029/12/31 23:59:59 http://bob/\r\n\r\n0\r\n";
         let err = parse_message(raw, &ctx(Some("http://bob"))).expect_err("must fail");
         assert!(matches!(err, ParseError::RecipientAddressInHeader));
     }

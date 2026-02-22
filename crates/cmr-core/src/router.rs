@@ -7,8 +7,10 @@ use hkdf::Hkdf;
 use num_bigint::{BigInt, BigUint, ToBigInt};
 use num_traits::{One, Zero};
 use rand::RngCore;
+use serde::Serialize;
 use sha2::Sha256;
 use thiserror::Error;
+use url::Url;
 
 use crate::key_exchange::{KeyExchangeError, KeyExchangeMessage, mod_pow, parse_key_exchange};
 use crate::policy::{AutoKeyExchangeMode, RoutingPolicy};
@@ -30,11 +32,28 @@ pub enum CompressionError {
 
 /// Compression capability (intentionally abstracted from router process).
 pub trait CompressionOracle: Send + Sync {
-    /// Symmetric NCD-like distance.
-    fn ncd_sym(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError>;
     /// CMR Section 3.2 compression distance from spec:
     /// `C(XY)-C(X) + C(YX)-C(Y)`.
     fn compression_distance(&self, left: &[u8], right: &[u8]) -> Result<f64, CompressionError>;
+    /// CMR Section 3.2 compression distance where each side can be provided
+    /// as a sequence of chunks without building contiguous buffers.
+    fn compression_distance_chain(
+        &self,
+        left_parts: &[&[u8]],
+        right_parts: &[&[u8]],
+    ) -> Result<f64, CompressionError> {
+        fn join(parts: &[&[u8]]) -> Vec<u8> {
+            let total = parts.iter().map(|p| p.len()).sum::<usize>();
+            let mut out = Vec::with_capacity(total);
+            for part in parts {
+                out.extend_from_slice(part);
+            }
+            out
+        }
+        let left = join(left_parts);
+        let right = join(right_parts);
+        self.compression_distance(&left, &right)
+    }
     /// Intrinsic dependence.
     fn intrinsic_dependence(&self, data: &[u8], max_order: i64) -> Result<f64, CompressionError>;
     /// Batch CMR distance, defaulting to repeated scalar calls.
@@ -46,18 +65,6 @@ pub trait CompressionOracle: Send + Sync {
         let mut out = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             out.push(self.compression_distance(target, candidate)?);
-        }
-        Ok(out)
-    }
-    /// Batch NCD, defaulting to repeated scalar calls.
-    fn batch_ncd_sym(
-        &self,
-        target: &[u8],
-        candidates: &[Vec<u8>],
-    ) -> Result<Vec<f64>, CompressionError> {
-        let mut out = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            out.push(self.ncd_sym(target, candidate)?);
         }
         Ok(out)
     }
@@ -78,6 +85,7 @@ struct MessageCache {
     total_bytes: usize,
     max_messages: usize,
     max_bytes: usize,
+    total_evictions: u64,
 }
 
 impl MessageCache {
@@ -89,6 +97,7 @@ impl MessageCache {
             total_bytes: 0,
             max_messages,
             max_bytes,
+            total_evictions: 0,
         }
     }
 
@@ -121,15 +130,14 @@ impl MessageCache {
 
     fn evict_as_needed(&mut self) {
         while self.entries.len() > self.max_messages || self.total_bytes > self.max_bytes {
-            let Some(key) = self.order.pop_front() else {
+            let Some(oldest_key) = self.order.pop_front() else {
                 break;
             };
-            let Some(entry) = self.entries.remove(&key) else {
-                continue;
-            };
-            self.total_bytes = self.total_bytes.saturating_sub(entry.encoded_size);
-            self.remove_message_ids(&entry.message);
-            debug_assert_eq!(entry.key, key);
+            if let Some(entry) = self.entries.remove(&oldest_key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.encoded_size);
+                self.remove_message_ids(&entry.message);
+                self.total_evictions = self.total_evictions.saturating_add(1);
+            }
         }
     }
 
@@ -181,6 +189,36 @@ impl MessageCache {
     }
 }
 
+/// Cache-level observability counters.
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheStats {
+    /// Number of cache entries.
+    pub entry_count: usize,
+    /// Sum of encoded bytes currently in cache.
+    pub total_bytes: usize,
+    /// Configured maximum entries.
+    pub max_messages: usize,
+    /// Configured maximum cache bytes.
+    pub max_bytes: usize,
+    /// Number of evictions performed.
+    pub total_evictions: u64,
+}
+
+/// Read-only cache entry projection for dashboards and APIs.
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheEntryView {
+    /// Stable cache key.
+    pub key: String,
+    /// Encoded message size.
+    pub encoded_size: usize,
+    /// Immediate sender address.
+    pub sender: String,
+    /// Origin timestamp text when available.
+    pub timestamp: String,
+    /// Short body preview, UTF-8 lossy.
+    pub body_preview: String,
+}
+
 #[derive(Clone, Debug)]
 struct PeerMetrics {
     reputation: f64,
@@ -189,6 +227,31 @@ struct PeerMetrics {
     outbound_messages: u64,
     outbound_bytes: u64,
     window: RateWindow,
+}
+
+/// Stable per-peer metrics projection.
+#[derive(Clone, Debug, Serialize)]
+pub struct PeerSnapshot {
+    /// Peer address.
+    pub peer: String,
+    /// Reputation score.
+    pub reputation: f64,
+    /// Inbound messages observed.
+    pub inbound_messages: u64,
+    /// Inbound bytes observed.
+    pub inbound_bytes: u64,
+    /// Outbound messages sent.
+    pub outbound_messages: u64,
+    /// Outbound bytes sent.
+    pub outbound_bytes: u64,
+    /// Sliding window message count.
+    pub current_window_messages: usize,
+    /// Sliding window bytes.
+    pub current_window_bytes: u64,
+    /// Whether a shared key is currently known for this peer.
+    pub has_shared_key: bool,
+    /// Whether key-exchange initiator state is pending for this peer.
+    pub pending_key_exchange: bool,
 }
 
 impl Default for PeerMetrics {
@@ -247,6 +310,14 @@ impl RateWindow {
         self.bytes = next_bytes;
         true
     }
+
+    fn current_messages(&self) -> usize {
+        self.window.len()
+    }
+
+    fn current_bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -282,9 +353,17 @@ pub enum ForwardReason {
 #[derive(Clone, Debug, Default)]
 struct RoutingDecision {
     best_peer: Option<String>,
-    matched_peers: Vec<String>,
+    best_distance_raw: Option<f64>,
+    best_distance_normalized: Option<f64>,
+    threshold_raw: f64,
     matched_messages: Vec<CmrMessage>,
     compensatory: Option<(String, CmrMessage)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RoutingActions {
+    forwards: Vec<ForwardAction>,
+    client_plans: Vec<ClientMessagePlan>,
 }
 
 /// Prepared outbound action.
@@ -296,6 +375,25 @@ pub struct ForwardAction {
     pub message_bytes: Vec<u8>,
     /// Reason for forwarding.
     pub reason: ForwardReason,
+}
+
+/// Client-side message creation plan emitted by router control logic.
+#[derive(Clone, Debug)]
+pub struct ClientMessagePlan {
+    /// Recipient peer address.
+    pub destination: String,
+    /// Message body to send in a fresh client-originated CMR message.
+    pub body: Vec<u8>,
+    /// Optional key for signing the created message.
+    pub signing_key: Option<Vec<u8>>,
+    /// Reason for message creation.
+    pub reason: ForwardReason,
+}
+
+#[derive(Clone, Debug, Default)]
+struct KeyExchangeControlOutcome {
+    forwards: Vec<ForwardAction>,
+    client_plans: Vec<ClientMessagePlan>,
 }
 
 /// Processing rejection reason.
@@ -370,10 +468,29 @@ pub struct ProcessOutcome {
     pub intrinsic_dependence: Option<f64>,
     /// Generated forwarding actions.
     pub forwards: Vec<ForwardAction>,
+    /// Client-originated message creation plans.
+    pub client_plans: Vec<ClientMessagePlan>,
+    /// Matched cached messages returned to a locally originating client post.
+    pub local_matches: Vec<CmrMessage>,
     /// Number of semantic matches found.
     pub matched_count: usize,
+    /// Routing distance diagnostics.
+    pub routing_diagnostics: Option<RoutingDiagnostics>,
     /// Whether this was a key exchange control message.
     pub key_exchange_control: bool,
+}
+
+/// Routing-distance diagnostics for threshold tuning and observability.
+#[derive(Clone, Debug)]
+pub struct RoutingDiagnostics {
+    /// Best candidate peer selected by raw distance ranking.
+    pub best_peer: Option<String>,
+    /// Best raw Section 3.2 distance.
+    pub best_distance_raw: Option<f64>,
+    /// Best normalized distance, when computable.
+    pub best_distance_normalized: Option<f64>,
+    /// Active raw threshold.
+    pub threshold_raw: f64,
 }
 
 impl ProcessOutcome {
@@ -384,7 +501,10 @@ impl ProcessOutcome {
             parsed_message: None,
             intrinsic_dependence: None,
             forwards: Vec::new(),
+            client_plans: Vec::new(),
+            local_matches: Vec::new(),
             matched_count: 0,
+            routing_diagnostics: None,
             key_exchange_control: false,
         }
     }
@@ -396,7 +516,10 @@ impl ProcessOutcome {
             parsed_message: Some(message),
             intrinsic_dependence: None,
             forwards: Vec::new(),
+            client_plans: Vec::new(),
+            local_matches: Vec::new(),
             matched_count: 0,
+            routing_diagnostics: None,
             key_exchange_control: false,
         }
     }
@@ -417,6 +540,15 @@ pub struct Router<O: CompressionOracle> {
 }
 
 impl<O: CompressionOracle> Router<O> {
+    fn normalized_match_distance(&self, raw_distance: f64, incoming_len: usize) -> Option<f64> {
+        if !raw_distance.is_finite() {
+            return None;
+        }
+        let bounded = raw_distance.max(0.0);
+        let scale = incoming_len.max(1) as f64;
+        Some((bounded / scale).clamp(0.0, 1.0))
+    }
+
     /// Creates a router instance.
     #[must_use]
     pub fn new(local_address: String, policy: RoutingPolicy, oracle: O) -> Self {
@@ -439,10 +571,192 @@ impl<O: CompressionOracle> Router<O> {
         self.shared_keys.insert(peer.into(), key);
     }
 
+    /// Local peer address.
+    #[must_use]
+    pub fn local_address(&self) -> &str {
+        &self.local_address
+    }
+
     /// Gets known shared key.
     #[must_use]
     pub fn shared_key(&self, peer: &str) -> Option<&[u8]> {
         self.shared_keys.get(peer).map(Vec::as_slice)
+    }
+
+    /// Returns active routing policy.
+    #[must_use]
+    pub fn policy(&self) -> &RoutingPolicy {
+        &self.policy
+    }
+
+    /// Replaces active policy and immediately updates cache limits.
+    pub fn set_policy(&mut self, policy: RoutingPolicy) {
+        self.cache.max_messages = policy.cache_max_messages;
+        self.cache.max_bytes = policy.cache_max_bytes;
+        self.policy = policy;
+        self.cache.evict_as_needed();
+    }
+
+    /// Snapshot of peer metrics.
+    #[must_use]
+    pub fn peer_snapshots(&self) -> Vec<PeerSnapshot> {
+        let mut names = self.peers.keys().cloned().collect::<HashSet<_>>();
+        names.extend(self.shared_keys.keys().cloned());
+        names.extend(self.pending_rsa.keys().cloned());
+        names.extend(self.pending_dh.keys().cloned());
+        let mut peers = names
+            .into_iter()
+            .filter(|peer| !self.is_local_peer_alias(peer))
+            .map(|peer| {
+                let metrics = self.peers.get(&peer).cloned().unwrap_or_default();
+                PeerSnapshot {
+                    reputation: metrics.reputation,
+                    inbound_messages: metrics.inbound_messages,
+                    inbound_bytes: metrics.inbound_bytes,
+                    outbound_messages: metrics.outbound_messages,
+                    outbound_bytes: metrics.outbound_bytes,
+                    current_window_messages: metrics.window.current_messages(),
+                    current_window_bytes: metrics.window.current_bytes(),
+                    has_shared_key: self.shared_keys.contains_key(&peer),
+                    pending_key_exchange: self.pending_rsa.contains_key(&peer)
+                        || self.pending_dh.contains_key(&peer),
+                    peer,
+                }
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.peer.cmp(&right.peer));
+        peers
+    }
+
+    /// Number of tracked peers.
+    #[must_use]
+    pub fn peer_count(&self) -> usize {
+        let mut names = self.peers.keys().cloned().collect::<HashSet<_>>();
+        names.extend(self.shared_keys.keys().cloned());
+        names.extend(self.pending_rsa.keys().cloned());
+        names.extend(self.pending_dh.keys().cloned());
+        names
+            .into_iter()
+            .filter(|peer| !self.is_local_peer_alias(peer))
+            .count()
+    }
+
+    /// Number of configured shared keys.
+    #[must_use]
+    pub fn known_keys_count(&self) -> usize {
+        self.shared_keys.len()
+    }
+
+    /// Number of pending key exchange initiator states.
+    #[must_use]
+    pub fn pending_key_exchange_count(&self) -> usize {
+        self.pending_rsa.len().saturating_add(self.pending_dh.len())
+    }
+
+    /// Adjusts peer reputation by delta.
+    pub fn adjust_reputation(&mut self, peer: &str, delta: f64) {
+        self.adjust_peer_reputation(peer, delta);
+    }
+
+    /// Removes a peer from local metrics and key state.
+    pub fn remove_peer(&mut self, peer: &str) -> bool {
+        let mut removed = false;
+        removed |= self.peers.remove(peer).is_some();
+        removed |= self.shared_keys.remove(peer).is_some();
+        removed |= self.pending_rsa.remove(peer).is_some();
+        removed |= self.pending_dh.remove(peer).is_some();
+        removed
+    }
+
+    /// Records a successfully delivered outbound message for peer-level accounting.
+    pub fn record_successful_outbound(&mut self, peer: &str, bytes: usize) {
+        self.record_peer_outbound(peer, bytes);
+    }
+
+    /// Inserts a local client-created message into cache without network-ingress checks.
+    pub fn cache_local_client_message(
+        &mut self,
+        raw_message: &[u8],
+        now: CmrTimestamp,
+    ) -> Result<(), ProcessError> {
+        let parse_ctx = ParseContext {
+            now,
+            recipient_address: None,
+            max_message_bytes: self.policy.content.max_message_bytes,
+            max_header_ids: self.policy.content.max_header_ids,
+        };
+        let parsed = parse_message(raw_message, &parse_ctx)?;
+        if parsed.body.len() > self.policy.content.max_body_bytes {
+            return Err(ProcessError::BodyTooLarge);
+        }
+        if !self.policy.content.allow_binary_payloads && is_probably_binary(&parsed.body) {
+            return Err(ProcessError::BinaryContentBlocked);
+        }
+        if self.policy.content.block_executable_magic && looks_like_executable(&parsed.body) {
+            return Err(ProcessError::ExecutableBlocked);
+        }
+        if self.cache.has_seen_any_id(&parsed) {
+            return Err(ProcessError::DuplicateMessageId);
+        }
+        self.cache.insert(parsed);
+        Ok(())
+    }
+
+    /// Current cache summary.
+    #[must_use]
+    pub fn cache_stats(&self) -> CacheStats {
+        CacheStats {
+            entry_count: self.cache.entries.len(),
+            total_bytes: self.cache.total_bytes,
+            max_messages: self.cache.max_messages,
+            max_bytes: self.cache.max_bytes,
+            total_evictions: self.cache.total_evictions,
+        }
+    }
+
+    /// Cache entries for observability.
+    #[must_use]
+    pub fn cache_entries(&self) -> Vec<CacheEntryView> {
+        self.cache
+            .order
+            .iter()
+            .filter_map(|key| self.cache.entries.get(key))
+            .map(|entry| {
+                let timestamp = entry
+                    .message
+                    .origin_id()
+                    .map_or_else(String::new, |id| id.timestamp.to_string());
+                let body_preview = String::from_utf8_lossy(&entry.message.body)
+                    .chars()
+                    .take(128)
+                    .collect::<String>();
+                CacheEntryView {
+                    key: entry.key.clone(),
+                    encoded_size: entry.encoded_size,
+                    sender: entry.message.immediate_sender().to_owned(),
+                    timestamp,
+                    body_preview,
+                }
+            })
+            .collect()
+    }
+
+    /// Computes Section 3.2 distance between two cached messages by cache keys.
+    pub fn cache_message_distance(
+        &self,
+        left_key: &str,
+        right_key: &str,
+    ) -> Result<Option<f64>, CompressionError> {
+        let Some(left) = self.cache.entries.get(left_key) else {
+            return Ok(None);
+        };
+        let Some(right) = self.cache.entries.get(right_key) else {
+            return Ok(None);
+        };
+        let distance = self
+            .oracle
+            .compression_distance(&left.message.to_bytes(), &right.message.to_bytes())?;
+        Ok(Some(distance))
     }
 
     /// Stores pending RSA initiator state for incoming replies.
@@ -462,6 +776,50 @@ impl<O: CompressionOracle> Router<O> {
             .insert(peer.into(), PendingDhState { p, a_secret });
     }
 
+    /// Builds an RSA key-exchange initiation for a destination peer.
+    pub fn initiate_rsa_key_exchange(
+        &mut self,
+        destination: &str,
+        now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
+        self.build_rsa_initiation_plan(destination, now)
+    }
+
+    /// Builds a DH key-exchange initiation for a destination peer.
+    pub fn initiate_dh_key_exchange(
+        &mut self,
+        destination: &str,
+        now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
+        self.build_dh_initiation_plan(destination, now)
+    }
+
+    /// Initiates clear key-exchange by sending shared key bytes over a secure channel.
+    pub fn initiate_clear_key_exchange(
+        &mut self,
+        destination: &str,
+        clear_key: Vec<u8>,
+        _now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
+        if clear_key.is_empty() {
+            return None;
+        }
+        let signing_key = self.shared_keys.get(destination).cloned();
+        self.shared_keys.insert(
+            destination.to_owned(),
+            derive_exchange_key_from_bytes(&self.local_address, destination, b"clear", &clear_key),
+        );
+        self.purge_key_exchange_cache(destination);
+        Some(ClientMessagePlan {
+            destination: destination.to_owned(),
+            body: KeyExchangeMessage::ClearKey { key: clear_key }
+                .render()
+                .into_bytes(),
+            signing_key,
+            reason: ForwardReason::KeyExchangeInitiation,
+        })
+    }
+
     /// Processes one inbound message.
     #[must_use]
     pub fn process_incoming(
@@ -470,9 +828,34 @@ impl<O: CompressionOracle> Router<O> {
         transport: TransportKind,
         now: CmrTimestamp,
     ) -> ProcessOutcome {
+        self.process_message(raw_message, transport, now, true)
+    }
+
+    /// Processes one local client-originated message.
+    ///
+    /// This path intentionally skips the recipient-address header guard used for
+    /// network ingress so local compose/injection can originate from the node's
+    /// own canonical address.
+    #[must_use]
+    pub fn process_local_client_message(
+        &mut self,
+        raw_message: &[u8],
+        transport: TransportKind,
+        now: CmrTimestamp,
+    ) -> ProcessOutcome {
+        self.process_message(raw_message, transport, now, false)
+    }
+
+    fn process_message(
+        &mut self,
+        raw_message: &[u8],
+        transport: TransportKind,
+        now: CmrTimestamp,
+        enforce_recipient_guard: bool,
+    ) -> ProcessOutcome {
         let parse_ctx = ParseContext {
             now: now.clone(),
-            recipient_address: Some(self.local_address.as_str()),
+            recipient_address: enforce_recipient_guard.then_some(self.local_address.as_str()),
             max_message_bytes: self.policy.content.max_message_bytes,
             max_header_ids: self.policy.content.max_header_ids,
         };
@@ -509,8 +892,8 @@ impl<O: CompressionOracle> Router<O> {
             return self.drop_for_peer(&parsed, ProcessError::ExecutableBlocked, -2.5);
         }
 
-        match self.handle_key_exchange_control(&parsed, &sender, &transport, &now) {
-            Ok(Some(forwards)) => {
+        match self.handle_key_exchange_control(&parsed, &sender, &transport) {
+            Ok(Some(control)) => {
                 self.adjust_peer_reputation(&sender, 1.5);
                 self.record_peer_inbound(&sender, raw_message.len());
                 return ProcessOutcome {
@@ -518,13 +901,23 @@ impl<O: CompressionOracle> Router<O> {
                     drop_reason: None,
                     parsed_message: Some(parsed),
                     intrinsic_dependence: None,
-                    forwards,
+                    forwards: control.forwards,
+                    client_plans: control.client_plans,
+                    local_matches: Vec::new(),
                     matched_count: 0,
+                    routing_diagnostics: None,
                     key_exchange_control: true,
                 };
             }
             Ok(None) => {}
-            Err(err) => return self.drop_for_peer(&parsed, err, -3.0),
+            Err(err) => {
+                let penalty = if matches!(err, ProcessError::MissingPendingKeyExchangeState) {
+                    0.0
+                } else {
+                    -3.0
+                };
+                return self.drop_for_peer(&parsed, err, penalty);
+            }
         }
 
         let id_score = match self
@@ -557,18 +950,32 @@ impl<O: CompressionOracle> Router<O> {
         };
         let mut outcome = ProcessOutcome::accepted(parsed.clone());
         outcome.intrinsic_dependence = Some(id_score);
-        outcome.matched_count = routing.matched_peers.len();
+        outcome.matched_count = routing.matched_messages.len();
+        outcome.routing_diagnostics = Some(RoutingDiagnostics {
+            best_peer: routing.best_peer.clone(),
+            best_distance_raw: routing.best_distance_raw,
+            best_distance_normalized: routing.best_distance_normalized,
+            threshold_raw: routing.threshold_raw,
+        });
+        if !enforce_recipient_guard {
+            let mut local_matches = routing.matched_messages.clone();
+            local_matches.truncate(self.policy.throughput.max_forward_actions);
+            outcome.local_matches = local_matches;
+        }
 
         self.cache.insert(parsed.clone());
         self.record_peer_inbound(&sender, raw_message.len());
         self.adjust_peer_reputation(&sender, 0.4);
 
-        let mut limited = self.build_routing_forwards(&parsed, routing, &now);
-        limited.truncate(self.policy.throughput.max_forward_actions);
-        for action in &limited {
-            self.record_peer_outbound(&action.destination, action.message_bytes.len());
-        }
-        outcome.forwards = limited;
+        let mut actions = self.build_routing_actions(&parsed, routing, &now);
+        actions
+            .forwards
+            .truncate(self.policy.throughput.max_forward_actions);
+        actions
+            .client_plans
+            .truncate(self.policy.throughput.max_forward_actions);
+        outcome.forwards = actions.forwards;
+        outcome.client_plans = actions.client_plans;
         outcome
     }
 
@@ -586,7 +993,10 @@ impl<O: CompressionOracle> Router<O> {
             parsed_message: Some(parsed.clone()),
             intrinsic_dependence: None,
             forwards: Vec::new(),
+            client_plans: Vec::new(),
+            local_matches: Vec::new(),
             matched_count: 0,
+            routing_diagnostics: None,
             key_exchange_control: false,
         }
     }
@@ -617,6 +1027,23 @@ impl<O: CompressionOracle> Router<O> {
         metrics.reputation = (metrics.reputation + delta).clamp(-100.0, 100.0);
     }
 
+    fn is_local_peer_alias(&self, peer: &str) -> bool {
+        let local = self.local_address.trim_end_matches('/');
+        let candidate = peer.trim_end_matches('/');
+        if candidate == local {
+            return true;
+        }
+
+        if let (Ok(local_url), Ok(candidate_url)) = (Url::parse(local), Url::parse(candidate)) {
+            if !same_origin(&local_url, &candidate_url) {
+                return false;
+            }
+            return is_path_alias(local_url.path(), candidate_url.path());
+        }
+
+        candidate.starts_with(&format!("{local}/"))
+    }
+
     fn record_peer_inbound(&mut self, peer: &str, bytes: usize) {
         let metrics = self.peers.entry(peer.to_owned()).or_default();
         metrics.inbound_messages = metrics.inbound_messages.saturating_add(1);
@@ -638,7 +1065,9 @@ impl<O: CompressionOracle> Router<O> {
             return true;
         };
         if metrics.inbound_bytes == 0 {
-            return metrics.outbound_bytes == 0;
+            // First-contact forwarding is allowed; ratio policy applies only
+            // after inbound traffic has been observed from this peer.
+            return true;
         }
         let ratio = metrics.outbound_bytes as f64 / metrics.inbound_bytes as f64;
         ratio <= self.policy.trust.max_outbound_inbound_ratio
@@ -681,8 +1110,7 @@ impl<O: CompressionOracle> Router<O> {
         message: &CmrMessage,
         sender: &str,
         transport: &TransportKind,
-        now: &CmrTimestamp,
-    ) -> Result<Option<Vec<ForwardAction>>, ProcessError> {
+    ) -> Result<Option<KeyExchangeControlOutcome>, ProcessError> {
         let Some(control) = parse_key_exchange(&message.body)? else {
             return Ok(None);
         };
@@ -703,7 +1131,7 @@ impl<O: CompressionOracle> Router<O> {
                     derive_exchange_key_from_bytes(&self.local_address, sender, b"clear", &key);
                 self.shared_keys.insert(sender.to_owned(), derived);
                 self.purge_key_exchange_cache(sender);
-                Ok(Some(Vec::new()))
+                Ok(Some(KeyExchangeControlOutcome::default()))
             }
             KeyExchangeMessage::RsaRequest { n, e } => {
                 validate_rsa_request_params(&n, &e)?;
@@ -713,13 +1141,20 @@ impl<O: CompressionOracle> Router<O> {
                 self.cache.insert(message.clone());
                 let c = mod_pow(&key, &e, &n);
                 let reply_body = KeyExchangeMessage::RsaReply { c }.render().into_bytes();
-                let reply = self.build_control_reply(sender, reply_body, old_key.as_deref(), now);
                 self.shared_keys.insert(
                     sender.to_owned(),
                     derive_exchange_key(&self.local_address, sender, b"rsa", &key),
                 );
                 self.purge_key_exchange_cache(sender);
-                Ok(Some(vec![reply]))
+                Ok(Some(KeyExchangeControlOutcome {
+                    forwards: Vec::new(),
+                    client_plans: vec![ClientMessagePlan {
+                        destination: sender.to_owned(),
+                        body: reply_body,
+                        signing_key: old_key,
+                        reason: ForwardReason::KeyExchangeReply,
+                    }],
+                }))
             }
             KeyExchangeMessage::RsaReply { c } => {
                 let Some(state) = self.pending_rsa.remove(sender) else {
@@ -742,7 +1177,7 @@ impl<O: CompressionOracle> Router<O> {
                     derive_exchange_key(&self.local_address, sender, b"rsa", &key),
                 );
                 self.purge_key_exchange_cache(sender);
-                Ok(Some(Vec::new()))
+                Ok(Some(KeyExchangeControlOutcome::default()))
             }
             KeyExchangeMessage::DhRequest { g, p, a_pub } => {
                 validate_dh_request_params(&g, &p, &a_pub)?;
@@ -759,13 +1194,20 @@ impl<O: CompressionOracle> Router<O> {
                 }
                 self.cache.insert(message.clone());
                 let reply_body = KeyExchangeMessage::DhReply { b_pub }.render().into_bytes();
-                let reply = self.build_control_reply(sender, reply_body, old_key.as_deref(), now);
                 self.shared_keys.insert(
                     sender.to_owned(),
                     derive_exchange_key(&self.local_address, sender, b"dh", &shared),
                 );
                 self.purge_key_exchange_cache(sender);
-                Ok(Some(vec![reply]))
+                Ok(Some(KeyExchangeControlOutcome {
+                    forwards: Vec::new(),
+                    client_plans: vec![ClientMessagePlan {
+                        destination: sender.to_owned(),
+                        body: reply_body,
+                        signing_key: old_key,
+                        reason: ForwardReason::KeyExchangeReply,
+                    }],
+                }))
             }
             KeyExchangeMessage::DhReply { b_pub } => {
                 let Some(state) = self.pending_dh.remove(sender) else {
@@ -784,34 +1226,8 @@ impl<O: CompressionOracle> Router<O> {
                     derive_exchange_key(&self.local_address, sender, b"dh", &shared),
                 );
                 self.purge_key_exchange_cache(sender);
-                Ok(Some(Vec::new()))
+                Ok(Some(KeyExchangeControlOutcome::default()))
             }
-        }
-    }
-
-    fn build_control_reply(
-        &mut self,
-        destination: &str,
-        body: Vec<u8>,
-        signing_key: Option<&[u8]>,
-        now: &CmrTimestamp,
-    ) -> ForwardAction {
-        let mut msg = CmrMessage {
-            signature: Signature::Unsigned,
-            header: vec![MessageId {
-                timestamp: self.next_forward_timestamp(now),
-                address: self.local_address.clone(),
-            }],
-            body,
-        };
-        if let Some(key) = signing_key {
-            msg.sign_with_key(key);
-        }
-        self.cache.insert(msg.clone());
-        ForwardAction {
-            destination: destination.to_owned(),
-            message_bytes: msg.to_bytes(),
-            reason: ForwardReason::KeyExchangeReply,
         }
     }
 
@@ -828,9 +1244,19 @@ impl<O: CompressionOracle> Router<O> {
         &self,
         incoming: &CmrMessage,
     ) -> Result<RoutingDecision, ProcessError> {
+        let threshold_raw = self.policy.spam.max_match_distance;
+        let mut decision = RoutingDecision {
+            best_peer: None,
+            best_distance_raw: None,
+            best_distance_normalized: None,
+            threshold_raw,
+            matched_messages: Vec::new(),
+            compensatory: None,
+        };
+
         let peer_corpora = self.collect_peer_corpora();
         if peer_corpora.is_empty() {
-            return Ok(RoutingDecision::default());
+            return Ok(decision);
         }
 
         let mut canonical_incoming = incoming.clone();
@@ -847,11 +1273,17 @@ impl<O: CompressionOracle> Router<O> {
 
         let mut best: Option<(String, f64)> = None;
         let mut matched_peers = Vec::<String>::new();
-        for (peer, distance) in peer_names.into_iter().zip(distances.into_iter()) {
+        let incoming_len = incoming_bytes.len();
+        for ((peer, _corpus), distance) in peer_names
+            .into_iter()
+            .zip(corpora.iter())
+            .zip(distances.into_iter())
+        {
             if !distance.is_finite() {
                 continue;
             }
-            if distance <= self.policy.spam.max_match_distance {
+            let passed_threshold = distance <= threshold_raw;
+            if passed_threshold {
                 matched_peers.push(peer.clone());
             }
             if best
@@ -863,24 +1295,26 @@ impl<O: CompressionOracle> Router<O> {
         }
 
         let Some((best_peer, best_distance)) = best else {
-            return Ok(RoutingDecision::default());
+            return Ok(decision);
         };
-        if best_distance > self.policy.spam.max_match_distance || matched_peers.is_empty() {
-            return Ok(RoutingDecision::default());
+        let Some(best_normalized) = self.normalized_match_distance(best_distance, incoming_len)
+        else {
+            return Ok(decision);
+        };
+        decision.best_peer = Some(best_peer.clone());
+        decision.best_distance_raw = Some(best_distance);
+        decision.best_distance_normalized = Some(best_normalized);
+
+        let passes_best_threshold = best_distance <= threshold_raw;
+        if !passes_best_threshold || matched_peers.is_empty() {
+            return Ok(decision);
         }
 
-        let matched_set = matched_peers
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        let matched_messages = self
-            .cache
-            .order
-            .iter()
-            .filter_map(|key| self.cache.entries.get(key))
-            .filter(|entry| matched_set.contains(entry.message.immediate_sender()))
-            .map(|entry| entry.message.clone())
-            .collect::<Vec<_>>();
+        let matched_messages =
+            self.select_matched_messages(&incoming_bytes, &matched_peers, threshold_raw)?;
+        if matched_messages.is_empty() {
+            return Ok(decision);
+        }
 
         let compensatory = if message_contains_sender(incoming, &best_peer) {
             self.select_compensatory_message(incoming, &best_peer, &peer_corpora)?
@@ -889,12 +1323,9 @@ impl<O: CompressionOracle> Router<O> {
             None
         };
 
-        Ok(RoutingDecision {
-            best_peer: Some(best_peer),
-            matched_peers,
-            matched_messages,
-            compensatory,
-        })
+        decision.matched_messages = matched_messages;
+        decision.compensatory = compensatory;
+        Ok(decision)
     }
 
     fn collect_peer_corpora(&self) -> HashMap<String, Vec<u8>> {
@@ -903,16 +1334,51 @@ impl<O: CompressionOracle> Router<O> {
             let Some(entry) = self.cache.entries.get(key) else {
                 continue;
             };
-            let sender = entry.message.immediate_sender();
-            if sender == self.local_address.as_str() {
+            if is_key_exchange_control_message(&entry.message) {
                 continue;
             }
+            let sender = entry.message.immediate_sender();
             peer_corpora
                 .entry(sender.to_owned())
                 .or_default()
                 .extend_from_slice(&entry.message.to_bytes());
         }
         peer_corpora
+    }
+
+    fn select_matched_messages(
+        &self,
+        incoming_bytes: &[u8],
+        matched_peers: &[String],
+        threshold_raw: f64,
+    ) -> Result<Vec<CmrMessage>, ProcessError> {
+        let matched = matched_peers
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut out = Vec::new();
+        for key in &self.cache.order {
+            let Some(entry) = self.cache.entries.get(key) else {
+                continue;
+            };
+            if is_key_exchange_control_message(&entry.message) {
+                continue;
+            }
+            if !matched.contains(entry.message.immediate_sender()) {
+                continue;
+            }
+            let mut candidate = entry.message.clone();
+            candidate.make_unsigned();
+            let candidate_bytes = candidate.to_bytes();
+            let distance = self
+                .oracle
+                .compression_distance(incoming_bytes, &candidate_bytes)
+                .map_err(ProcessError::Compression)?;
+            if distance.is_finite() && distance <= threshold_raw {
+                out.push(entry.message.clone());
+            }
+        }
+        Ok(out)
     }
 
     fn select_compensatory_message(
@@ -926,6 +1392,7 @@ impl<O: CompressionOracle> Router<O> {
             .order
             .iter()
             .filter_map(|key| self.cache.entries.get(key))
+            .filter(|entry| !is_key_exchange_control_message(&entry.message))
             .collect::<Vec<_>>();
         if ordered_entries.len() <= 1 {
             return Ok(None);
@@ -939,6 +1406,15 @@ impl<O: CompressionOracle> Router<O> {
             .iter()
             .map(|(_, bytes)| bytes.len())
             .sum::<usize>();
+        let mut cache_blob = Vec::with_capacity(total_bytes);
+        let mut ranges = Vec::with_capacity(encoded_entries.len());
+        for (_, bytes) in &encoded_entries {
+            let start = cache_blob.len();
+            cache_blob.extend_from_slice(bytes);
+            let end = cache_blob.len();
+            ranges.push((start, end));
+        }
+
         let mut canonical_incoming = incoming.clone();
         canonical_incoming.make_unsigned();
         let mut x_guess = Vec::with_capacity(
@@ -949,6 +1425,16 @@ impl<O: CompressionOracle> Router<O> {
         if let Some(known_from_best_peer) = peer_corpora.get(best_peer) {
             x_guess.extend_from_slice(known_from_best_peer);
         }
+        let guess_distances = self
+            .oracle
+            .batch_compression_distance(
+                &x_guess,
+                &encoded_entries
+                    .iter()
+                    .map(|(_, bytes)| bytes.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(ProcessError::Compression)?;
 
         let mut best_score = f64::NEG_INFINITY;
         let mut best_message = None;
@@ -959,27 +1445,31 @@ impl<O: CompressionOracle> Router<O> {
             if total_bytes <= candidate_bytes.len() {
                 continue;
             }
-
-            let mut remainder =
-                Vec::with_capacity(total_bytes.saturating_sub(candidate_bytes.len()));
-            for (other_idx, (_, other_bytes)) in encoded_entries.iter().enumerate() {
-                if idx == other_idx {
-                    continue;
-                }
-                remainder.extend_from_slice(other_bytes);
+            let (start, end) = ranges[idx];
+            let mut right_parts: [&[u8]; 2] = [&[][..], &[][..]];
+            let mut right_count = 0;
+            if start > 0 {
+                right_parts[right_count] = &cache_blob[..start];
+                right_count += 1;
             }
-            if remainder.is_empty() {
+            if end < cache_blob.len() {
+                right_parts[right_count] = &cache_blob[end..];
+                right_count += 1;
+            }
+            if right_count == 0 {
                 continue;
             }
 
             let d_cache = self
                 .oracle
-                .compression_distance(candidate_bytes, &remainder)
+                .compression_distance_chain(
+                    &[candidate_bytes.as_slice()],
+                    &right_parts[..right_count],
+                )
                 .map_err(ProcessError::Compression)?;
-            let d_guess = self
-                .oracle
-                .compression_distance(&x_guess, candidate_bytes)
-                .map_err(ProcessError::Compression)?;
+            let Some(d_guess) = guess_distances.get(idx).copied() else {
+                continue;
+            };
             if !d_cache.is_finite() || !d_guess.is_finite() {
                 continue;
             }
@@ -993,13 +1483,13 @@ impl<O: CompressionOracle> Router<O> {
         Ok(best_message)
     }
 
-    fn build_routing_forwards(
+    fn build_routing_actions(
         &mut self,
         incoming: &CmrMessage,
         decision: RoutingDecision,
         now: &CmrTimestamp,
-    ) -> Vec<ForwardAction> {
-        let mut out = Vec::new();
+    ) -> RoutingActions {
+        let mut out = RoutingActions::default();
         let mut dedupe = HashSet::<(String, String)>::new();
         let incoming_key = cache_key(incoming);
         let incoming_destinations = sorted_unique_addresses(&incoming.header);
@@ -1017,9 +1507,10 @@ impl<O: CompressionOracle> Router<O> {
                     now,
                     ForwardReason::CompensatoryReply,
                 );
-                if !actions.is_empty() {
+                if !actions.forwards.is_empty() {
                     dedupe.insert(dedupe_key);
-                    out.extend(actions);
+                    out.forwards.extend(actions.forwards);
+                    out.client_plans.extend(actions.client_plans);
                 }
             }
         }
@@ -1042,9 +1533,10 @@ impl<O: CompressionOracle> Router<O> {
                     now,
                     ForwardReason::MatchedForwardIncoming,
                 );
-                if !actions.is_empty() {
+                if !actions.forwards.is_empty() {
                     dedupe.insert(dedupe_key);
-                    out.extend(actions);
+                    out.forwards.extend(actions.forwards);
+                    out.client_plans.extend(actions.client_plans);
                 }
             }
 
@@ -1063,9 +1555,10 @@ impl<O: CompressionOracle> Router<O> {
                     now,
                     ForwardReason::MatchedForwardCached,
                 );
-                if !actions.is_empty() {
+                if !actions.forwards.is_empty() {
                     dedupe.insert(dedupe_key);
-                    out.extend(actions);
+                    out.forwards.extend(actions.forwards);
+                    out.client_plans.extend(actions.client_plans);
                 }
             }
         }
@@ -1079,49 +1572,37 @@ impl<O: CompressionOracle> Router<O> {
         destination: &str,
         now: &CmrTimestamp,
         reason: ForwardReason,
-    ) -> Vec<ForwardAction> {
+    ) -> RoutingActions {
         if destination == self.local_address
             || !self.can_forward_to_peer(destination)
             || message_contains_sender(message, destination)
         {
-            return Vec::new();
+            return RoutingActions::default();
         }
 
-        let mut out = Vec::with_capacity(2);
-        out.push(self.wrap_and_forward(message, destination, now, reason));
-        if self.shared_keys.contains_key(destination)
-            || self.pending_rsa.contains_key(destination)
-            || self.pending_dh.contains_key(destination)
+        let mut out = RoutingActions::default();
+        if !self.shared_keys.contains_key(destination)
+            && !self.pending_rsa.contains_key(destination)
+            && !self.pending_dh.contains_key(destination)
         {
-            return out;
+            let kx = match self.policy.trust.auto_key_exchange_mode {
+                AutoKeyExchangeMode::Rsa => self.build_rsa_initiation_plan(destination, now),
+                AutoKeyExchangeMode::Dh => self.build_dh_initiation_plan(destination, now),
+            };
+            if let Some(plan) = kx {
+                out.client_plans.push(plan);
+            }
         }
-
-        if let Some(initiation) = self.build_key_exchange_initiation(destination, now) {
-            out.push(initiation);
-        }
+        out.forwards
+            .push(self.wrap_and_forward(message, destination, now, reason));
         out
     }
 
-    fn build_key_exchange_initiation(
+    fn build_rsa_initiation_plan(
         &mut self,
         destination: &str,
-        now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
-        match self.policy.trust.auto_key_exchange_mode {
-            AutoKeyExchangeMode::Rsa => self
-                .build_rsa_initiation(destination, now)
-                .or_else(|| self.build_dh_initiation(destination, now)),
-            AutoKeyExchangeMode::Dh => self
-                .build_dh_initiation(destination, now)
-                .or_else(|| self.build_rsa_initiation(destination, now)),
-        }
-    }
-
-    fn build_rsa_initiation(
-        &mut self,
-        destination: &str,
-        now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
+        _now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
         let e = BigUint::from(65_537_u32);
         let bits_each = usize::try_from(MIN_RSA_MODULUS_BITS / 2).ok()?;
         let mut generated = None;
@@ -1158,27 +1639,19 @@ impl<O: CompressionOracle> Router<O> {
         let body = KeyExchangeMessage::RsaRequest { n, e }
             .render()
             .into_bytes();
-        let msg = CmrMessage {
-            signature: Signature::Unsigned,
-            header: vec![MessageId {
-                timestamp: self.next_forward_timestamp(now),
-                address: self.local_address.clone(),
-            }],
-            body,
-        };
-        self.cache.insert(msg.clone());
-        Some(ForwardAction {
+        Some(ClientMessagePlan {
             destination: destination.to_owned(),
-            message_bytes: msg.to_bytes(),
+            body,
+            signing_key: None,
             reason: ForwardReason::KeyExchangeInitiation,
         })
     }
 
-    fn build_dh_initiation(
+    fn build_dh_initiation_plan(
         &mut self,
         destination: &str,
-        now: &CmrTimestamp,
-    ) -> Option<ForwardAction> {
+        _now: &CmrTimestamp,
+    ) -> Option<ClientMessagePlan> {
         let bits = usize::try_from(MIN_DH_MODULUS_BITS).ok()?;
         let p = generate_probable_safe_prime(bits, 10)?;
         let g = find_primitive_root_for_safe_prime(&p)?;
@@ -1195,18 +1668,10 @@ impl<O: CompressionOracle> Router<O> {
         let body = KeyExchangeMessage::DhRequest { g, p, a_pub }
             .render()
             .into_bytes();
-        let msg = CmrMessage {
-            signature: Signature::Unsigned,
-            header: vec![MessageId {
-                timestamp: self.next_forward_timestamp(now),
-                address: self.local_address.clone(),
-            }],
-            body,
-        };
-        self.cache.insert(msg.clone());
-        Some(ForwardAction {
+        Some(ClientMessagePlan {
             destination: destination.to_owned(),
-            message_bytes: msg.to_bytes(),
+            body,
+            signing_key: None,
             reason: ForwardReason::KeyExchangeInitiation,
         })
     }
@@ -1221,7 +1686,8 @@ impl<O: CompressionOracle> Router<O> {
         let mut forwarded = message.clone();
         forwarded.make_unsigned();
         forwarded.prepend_hop(MessageId {
-            timestamp: self.next_forward_timestamp(now),
+            timestamp: self
+                .next_forward_timestamp(now, message.header.first().map(|id| &id.timestamp)),
             address: self.local_address.clone(),
         });
         if let Some(key) = self.shared_keys.get(destination) {
@@ -1234,11 +1700,72 @@ impl<O: CompressionOracle> Router<O> {
         }
     }
 
-    fn next_forward_timestamp(&mut self, now: &CmrTimestamp) -> CmrTimestamp {
+    fn next_forward_timestamp(
+        &mut self,
+        now: &CmrTimestamp,
+        newer_than: Option<&CmrTimestamp>,
+    ) -> CmrTimestamp {
         self.forward_counter = self.forward_counter.saturating_add(1);
-        let fraction = format!("{:020}", self.forward_counter);
-        now.clone().with_fraction(fraction)
+        let now_text = now.to_string();
+        let (date_part, now_fraction) = split_timestamp_text(&now_text);
+        let counter_suffix = format!("{:011}", self.forward_counter % 100_000_000_000);
+        let mut fraction = if now_fraction.is_empty() {
+            format!("{:09}", self.forward_counter % 1_000_000_000)
+        } else {
+            format!("{now_fraction}{counter_suffix}")
+        };
+        let mut candidate = parse_timestamp_with_fraction(date_part, &fraction)
+            .unwrap_or_else(|| now.clone().with_fraction(fraction.clone()));
+        if let Some(min_ts) = newer_than
+            && candidate <= *min_ts
+        {
+            let min_text = min_ts.to_string();
+            let (min_date, min_fraction) = split_timestamp_text(&min_text);
+            fraction = format!("{min_fraction}1");
+            candidate = parse_timestamp_with_fraction(min_date, &fraction)
+                .unwrap_or_else(|| min_ts.clone().with_fraction(fraction));
+        }
+        candidate
     }
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left.host_str().map(|h| h.to_ascii_lowercase())
+            == right.host_str().map(|h| h.to_ascii_lowercase())
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn is_path_alias(local_path: &str, candidate_path: &str) -> bool {
+    let local = normalize_alias_path(local_path);
+    let candidate = normalize_alias_path(candidate_path);
+    candidate == local || candidate.starts_with(&format!("{local}/"))
+}
+
+fn normalize_alias_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn split_timestamp_text(input: &str) -> (&str, &str) {
+    if let Some((date, fraction)) = input.split_once('.') {
+        (date, fraction)
+    } else {
+        (input, "")
+    }
+}
+
+fn parse_timestamp_with_fraction(date_part: &str, fraction: &str) -> Option<CmrTimestamp> {
+    let text = if fraction.is_empty() {
+        date_part.to_owned()
+    } else {
+        format!("{date_part}.{fraction}")
+    };
+    CmrTimestamp::parse(&text).ok()
 }
 
 fn cache_key(message: &CmrMessage) -> String {
@@ -1249,6 +1776,10 @@ fn cache_key(message: &CmrMessage) -> String {
 
 fn message_contains_sender(message: &CmrMessage, sender: &str) -> bool {
     message.header.iter().any(|id| id.address == sender)
+}
+
+fn is_key_exchange_control_message(message: &CmrMessage) -> bool {
+    parse_key_exchange(&message.body).ok().flatten().is_some()
 }
 
 fn sorted_unique_addresses(header: &[MessageId]) -> Vec<String> {
@@ -1647,10 +2178,6 @@ mod tests {
     struct StubOracle;
 
     impl CompressionOracle for StubOracle {
-        fn ncd_sym(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-            Ok(0.4)
-        }
-
         fn compression_distance(
             &self,
             _left: &[u8],
@@ -1698,6 +2225,26 @@ mod tests {
     }
 
     #[test]
+    fn local_client_processing_allows_local_sender_while_network_ingress_rejects_it() {
+        let policy = RoutingPolicy::default();
+        let mut router = Router::new("http://bob/".to_owned(), policy, StubOracle);
+        let local_sender = b"0\r\n2029/12/31 23:59:59 http://bob/\r\n\r\n2\r\nhi";
+
+        let ingress = router.process_incoming(local_sender, TransportKind::Http, now());
+        assert!(!ingress.accepted);
+        assert!(matches!(
+            ingress.drop_reason,
+            Some(ProcessError::Parse(
+                crate::protocol::ParseError::RecipientAddressInHeader
+            ))
+        ));
+
+        let local = router.process_local_client_message(local_sender, TransportKind::Http, now());
+        assert!(local.accepted);
+        assert!(local.drop_reason.is_none());
+    }
+
+    #[test]
     fn cache_inserts_messages_in_unsigned_canonical_form() {
         let mut cache = MessageCache::new(16, 1024 * 1024);
         let mut message = CmrMessage {
@@ -1716,5 +2263,29 @@ mod tests {
         let stored = cache.entries.get(&key).expect("cached entry");
         assert!(matches!(stored.message.signature, Signature::Unsigned));
         assert!(stored.message.to_bytes().starts_with(b"0\r\n"));
+    }
+
+    #[test]
+    fn forward_timestamp_is_strictly_newer_than_existing_header() {
+        let policy = RoutingPolicy::default();
+        let mut router = Router::new("http://bob".to_owned(), policy, StubOracle);
+        let now = CmrTimestamp::parse("2030/01/01 00:00:10.000000001").expect("now");
+        let newest_existing = CmrTimestamp::parse("2030/01/01 00:00:10.9").expect("existing");
+        let forwarded = router.next_forward_timestamp(&now, Some(&newest_existing));
+        assert!(forwarded > newest_existing);
+    }
+
+    #[test]
+    fn local_peer_alias_rejects_prefix_collisions() {
+        let policy = RoutingPolicy::default();
+        let router = Router::new("http://peer.example/cmr".to_owned(), policy, StubOracle);
+        assert!(!router.is_local_peer_alias("http://peer.example/cmr-admin"));
+    }
+
+    #[test]
+    fn local_peer_alias_accepts_same_origin_subpath() {
+        let policy = RoutingPolicy::default();
+        let router = Router::new("http://peer.example/cmr".to_owned(), policy, StubOracle);
+        assert!(router.is_local_peer_alias("http://peer.example/cmr/inbox"));
     }
 }

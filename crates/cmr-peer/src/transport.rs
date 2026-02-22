@@ -31,6 +31,7 @@ const UDP_MAX_PAYLOAD_BYTES: usize = 65_507;
 const DEFAULT_HANDSHAKE_TTL_SECONDS: u64 = 300;
 const DEFAULT_HANDSHAKE_MAX_ENTRIES: usize = 1024;
 const DEFAULT_HANDSHAKE_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_HANDSHAKE_MAX_READS: u8 = 1;
 
 /// Stored one-time HTTP handshake payloads.
 pub struct HandshakeStore {
@@ -53,6 +54,7 @@ struct StoredPayload {
     payload: Vec<u8>,
     inserted_at: Instant,
     seq: u64,
+    remaining_reads: u8,
 }
 
 impl HandshakeStore {
@@ -74,7 +76,7 @@ impl HandshakeStore {
         }
     }
 
-    /// Stores one message payload under a one-time key.
+    /// Stores one message payload under a short-lived key.
     pub fn put(&self, key: String, payload: Vec<u8>) -> bool {
         let Ok(mut guard) = self.inner.lock() else {
             return false;
@@ -97,6 +99,7 @@ impl HandshakeStore {
                 payload,
                 inserted_at: Instant::now(),
                 seq,
+                remaining_reads: DEFAULT_HANDSHAKE_MAX_READS,
             },
         );
         guard.order.push_back((key.clone(), seq));
@@ -104,10 +107,16 @@ impl HandshakeStore {
         guard.payloads.contains_key(&key)
     }
 
-    /// Takes and removes one payload.
+    /// Returns one payload read and decrements remaining read budget.
     pub fn take(&self, key: &str) -> Option<Vec<u8>> {
         let mut guard = self.inner.lock().ok()?;
         prune_expired(&mut guard);
+        if let Some(entry) = guard.payloads.get_mut(key)
+            && entry.remaining_reads > 1
+        {
+            entry.remaining_reads = entry.remaining_reads.saturating_sub(1);
+            return Some(entry.payload.clone());
+        }
         let entry = guard.payloads.remove(key)?;
         guard.total_bytes = guard.total_bytes.saturating_sub(entry.payload.len());
         Some(entry.payload)
@@ -170,6 +179,8 @@ pub struct TransportManager {
     local_address: String,
     prefer_http_handshake: bool,
     handshake_store: Arc<HandshakeStore>,
+    handshake_max_message_bytes: usize,
+    handshake_max_header_ids: usize,
 }
 
 impl TransportManager {
@@ -180,6 +191,8 @@ impl TransportManager {
         ssh_cfg: SshConfig,
         prefer_http_handshake: bool,
         handshake_store: Arc<HandshakeStore>,
+        handshake_max_message_bytes: usize,
+        handshake_max_header_ids: usize,
     ) -> Result<Self, TransportError> {
         let mut http_connector = HttpConnector::new();
         http_connector.enforce_http(false);
@@ -226,6 +239,8 @@ impl TransportManager {
             local_address,
             prefer_http_handshake,
             handshake_store,
+            handshake_max_message_bytes: handshake_max_message_bytes.max(1),
+            handshake_max_header_ids: handshake_max_header_ids.max(1),
         })
     }
 
@@ -347,7 +362,7 @@ impl TransportManager {
         wire_message: &[u8],
     ) -> Result<(), TransportError> {
         let one_time_key = random_hex(12);
-        let unsigned = canonicalize_unsigned_cmr_message(wire_message)?;
+        let unsigned = self.canonicalize_unsigned_cmr_message(wire_message)?;
         if !self.handshake_store.put(one_time_key.clone(), unsigned) {
             return Err(TransportError::HandshakeStoreFull);
         }
@@ -384,6 +399,24 @@ impl TransportManager {
                 resp.status()
             )))
         }
+    }
+
+    fn canonicalize_unsigned_cmr_message(
+        &self,
+        wire_message: &[u8],
+    ) -> Result<Vec<u8>, TransportError> {
+        let now =
+            CmrTimestamp::parse("9999/12/31 23:59:59.999").expect("hardcoded timestamp must parse");
+        let ctx = ParseContext {
+            now,
+            recipient_address: None,
+            max_message_bytes: self.handshake_max_message_bytes,
+            max_header_ids: self.handshake_max_header_ids,
+        };
+        let mut parsed = parse_message(wire_message, &ctx)
+            .map_err(|err| TransportError::Http(format!("invalid handshake payload: {err}")))?;
+        parsed.make_unsigned();
+        Ok(parsed.to_bytes())
     }
 
     async fn send_udp(&self, url: &Url, wire_message: &[u8]) -> Result<(), TransportError> {
@@ -493,21 +526,6 @@ impl TransportManager {
             ))
         }
     }
-}
-
-fn canonicalize_unsigned_cmr_message(wire_message: &[u8]) -> Result<Vec<u8>, TransportError> {
-    let now =
-        CmrTimestamp::parse("9999/12/31 23:59:59.999").expect("hardcoded timestamp must parse");
-    let ctx = ParseContext {
-        now,
-        recipient_address: None,
-        max_message_bytes: wire_message.len().max(4 * 1024 * 1024),
-        max_header_ids: 16_384,
-    };
-    let mut parsed = parse_message(wire_message, &ctx)
-        .map_err(|err| TransportError::Http(format!("invalid handshake payload: {err}")))?;
-    parsed.make_unsigned();
-    Ok(parsed.to_bytes())
 }
 
 /// Extracts CMR bytes from HTTP upload body.

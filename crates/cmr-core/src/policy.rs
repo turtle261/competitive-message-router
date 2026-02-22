@@ -35,7 +35,7 @@ pub struct ThroughputPolicy {
 pub struct SpamPolicy {
     /// Minimum intrinsic dependence accepted for untrusted payloads.
     pub min_intrinsic_dependence: f64,
-    /// Maximum distance for message match/forwarding.
+    /// Maximum raw Section 3.2 match distance for forwarding gates.
     pub max_match_distance: f64,
     /// Estimator order for intrinsic-dependence checks.
     pub intrinsic_dependence_order: i64,
@@ -120,7 +120,7 @@ impl RoutingPolicy {
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.02,
-                    max_match_distance: 0.72,
+                    max_match_distance: 500.0,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {
@@ -152,7 +152,7 @@ impl RoutingPolicy {
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.01,
-                    max_match_distance: 0.75,
+                    max_match_distance: 700.0,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {
@@ -184,7 +184,7 @@ impl RoutingPolicy {
                 },
                 spam: SpamPolicy {
                     min_intrinsic_dependence: 0.0,
-                    max_match_distance: 0.8,
+                    max_match_distance: 800.0,
                     intrinsic_dependence_order: 8,
                 },
                 trust: TrustPolicy {

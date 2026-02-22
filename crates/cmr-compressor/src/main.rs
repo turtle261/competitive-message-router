@@ -6,14 +6,16 @@ use cmr_core::compressor_ipc::{
     CompressorRequest, CompressorResponse, DEFAULT_MAX_FRAME_BYTES, IpcError, read_frame,
     write_frame,
 };
-use infotheory::{InfotheoryCtx, NcdVariant};
+use infotheory::InfotheoryCtx;
+use rayon::prelude::*;
 
 fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
-    let ctx = InfotheoryCtx::default();
+    let zpaq_method = resolve_zpaq_method(std::env::args().skip(1));
+    let ctx = InfotheoryCtx::with_zpaq(zpaq_method);
 
     loop {
         let req = match read_frame::<CompressorRequest>(&mut reader, DEFAULT_MAX_FRAME_BYTES) {
@@ -37,15 +39,50 @@ fn main() {
     }
 }
 
+fn resolve_zpaq_method(args: impl Iterator<Item = String>) -> String {
+    let mut method_from_args: Option<String> = None;
+    let mut pending_method = false;
+    for arg in args {
+        if pending_method {
+            if !arg.is_empty() {
+                method_from_args = Some(arg);
+            }
+            pending_method = false;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--zpaq-method=") {
+            if !value.is_empty() {
+                method_from_args = Some(value.to_owned());
+            }
+            continue;
+        }
+        if arg == "--zpaq-method" {
+            pending_method = true;
+        }
+    }
+
+    method_from_args
+        .or_else(|| std::env::var("CMR_ZPAQ_METHOD").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "5".to_owned())
+}
+
 fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResponse {
     match req {
         CompressorRequest::Health => CompressorResponse::Health { ok: true },
-        CompressorRequest::NcdSym { left, right } => CompressorResponse::NcdSym {
-            value: ctx.ncd_bytes(&left, &right, NcdVariant::SymVitanyi),
-        },
         CompressorRequest::CompressionDistance { left, right } => {
             CompressorResponse::CompressionDistance {
                 value: compression_distance(ctx, &left, &right),
+            }
+        }
+        CompressorRequest::CompressionDistanceChain {
+            left_parts,
+            right_parts,
+        } => {
+            let left_refs = left_parts.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let right_refs = right_parts.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            CompressorResponse::CompressionDistance {
+                value: compression_distance_chain(ctx, &left_refs, &right_refs),
             }
         }
         CompressorRequest::IntrinsicDependence { data, max_order } => {
@@ -53,16 +90,9 @@ fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResp
                 value: ctx.intrinsic_dependence_bytes(&data, max_order),
             }
         }
-        CompressorRequest::BatchNcdSym { target, candidates } => {
-            let values = candidates
-                .iter()
-                .map(|candidate| ctx.ncd_bytes(&target, candidate, NcdVariant::SymVitanyi))
-                .collect();
-            CompressorResponse::BatchNcdSym { values }
-        }
         CompressorRequest::BatchCompressionDistance { target, candidates } => {
             let values = candidates
-                .iter()
+                .par_iter()
                 .map(|candidate| compression_distance(ctx, &target, candidate))
                 .collect();
             CompressorResponse::BatchCompressionDistance { values }
@@ -75,5 +105,23 @@ fn compression_distance(ctx: &InfotheoryCtx, left: &[u8], right: &[u8]) -> f64 {
     let c_right = ctx.compress_size(right) as f64;
     let c_xy = ctx.compress_size_chain(&[left, right]) as f64;
     let c_yx = ctx.compress_size_chain(&[right, left]) as f64;
+    (c_xy - c_left) + (c_yx - c_right)
+}
+
+fn compression_distance_chain(
+    ctx: &InfotheoryCtx,
+    left_parts: &[&[u8]],
+    right_parts: &[&[u8]],
+) -> f64 {
+    let c_left = ctx.compress_size_chain(left_parts) as f64;
+    let c_right = ctx.compress_size_chain(right_parts) as f64;
+    let mut xy = Vec::with_capacity(left_parts.len() + right_parts.len());
+    xy.extend_from_slice(left_parts);
+    xy.extend_from_slice(right_parts);
+    let mut yx = Vec::with_capacity(right_parts.len() + left_parts.len());
+    yx.extend_from_slice(right_parts);
+    yx.extend_from_slice(left_parts);
+    let c_xy = ctx.compress_size_chain(&xy) as f64;
+    let c_yx = ctx.compress_size_chain(&yx) as f64;
     (c_xy - c_left) + (c_yx - c_right)
 }

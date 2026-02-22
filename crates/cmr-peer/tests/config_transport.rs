@@ -23,28 +23,16 @@ use tokio::sync::oneshot;
 #[derive(Clone)]
 struct Oracle {
     intrinsic: f64,
-    ncd: f64,
+    distance: f64,
 }
 
 impl CompressionOracle for Oracle {
-    fn ncd_sym(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-        Ok(self.ncd)
-    }
-
     fn compression_distance(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
-        Ok(self.ncd)
+        Ok(self.distance)
     }
 
     fn intrinsic_dependence(&self, _data: &[u8], _max_order: i64) -> Result<f64, CompressionError> {
         Ok(self.intrinsic)
-    }
-
-    fn batch_ncd_sym(
-        &self,
-        _target: &[u8],
-        candidates: &[Vec<u8>],
-    ) -> Result<Vec<f64>, CompressionError> {
-        Ok(vec![self.ncd; candidates.len()])
     }
 }
 
@@ -154,7 +142,29 @@ service = "cmr"
     assert_eq!(cfg.local_address, "http://127.0.0.1:8080/");
     assert_eq!(cfg.listen.http.expect("http").path, "/");
     assert!(policy.content.max_message_bytes > 0);
+    assert_eq!(cfg.ambient.seed_fanout, 8);
+    assert!(cfg.ambient.seed_peers.is_empty());
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn config_policy_tuning_overrides_raw_match_distance() {
+    let toml = r#"
+local_address = "http://127.0.0.1:8080/"
+security_level = "strict"
+prefer_http_handshake = false
+
+[listen]
+[listen.http]
+bind = "127.0.0.1:8080"
+path = "/"
+
+[policy_tuning]
+max_match_distance = 123.0
+"#;
+    let cfg = PeerConfig::from_toml_str(toml).expect("parse config");
+    let policy = cfg.effective_policy();
+    assert_eq!(policy.spam.max_match_distance, 123.0);
 }
 
 #[test]
@@ -180,7 +190,7 @@ fn extract_payload_plain_and_multipart() {
 }
 
 #[test]
-fn handshake_store_is_one_time() {
+fn handshake_store_is_one_time_read() {
     let store = HandshakeStore::default();
     assert!(store.put("k1".to_owned(), b"hello".to_vec()));
     assert_eq!(store.take("k1").as_deref(), Some(&b"hello"[..]));
@@ -208,6 +218,8 @@ async fn transport_sends_udp_payload() {
         SshConfig::default(),
         false,
         handshake_store,
+        4 * 1024 * 1024,
+        1024,
     )
     .await
     .expect("transport");
@@ -232,6 +244,8 @@ async fn transport_udp_rejects_missing_service_tag() {
         SshConfig::default(),
         false,
         handshake_store,
+        4 * 1024 * 1024,
+        1024,
     )
     .await
     .expect("transport");
@@ -252,6 +266,8 @@ async fn transport_rejects_invalid_handshake_callback_targets() {
         SshConfig::default(),
         false,
         Arc::new(HandshakeStore::default()),
+        4 * 1024 * 1024,
+        1024,
     )
     .await
     .expect("transport");
@@ -294,6 +310,8 @@ async fn http_handshake_stores_unsigned_payload() {
         SshConfig::default(),
         true,
         Arc::clone(&handshake_store),
+        4 * 1024 * 1024,
+        1024,
     )
     .await
     .expect("transport");
@@ -335,6 +353,32 @@ async fn http_handshake_stores_unsigned_payload() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_handshake_respects_configured_max_header_ids() {
+    init_crypto_provider();
+    let transport = TransportManager::new(
+        "http://local".to_owned(),
+        None,
+        SshConfig::default(),
+        true,
+        Arc::new(HandshakeStore::default()),
+        4 * 1024 * 1024,
+        1,
+    )
+    .await
+    .expect("transport");
+
+    let wire =
+        b"0\r\n2029/12/31 23:59:59 http://relay\r\n2029/12/31 23:59:58 http://origin\r\n\r\n5\r\nhello";
+    let err = transport
+        .send_message("http://127.0.0.1:9/", wire)
+        .await
+        .expect_err("must reject handshake payload above max_header_ids");
+    let text = err.to_string();
+    assert!(text.contains("invalid handshake payload"));
+    assert!(text.contains("too many header entries"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_transport_rejects_command_injection_path() {
     init_crypto_provider();
     let transport = TransportManager::new(
@@ -343,6 +387,8 @@ async fn ssh_transport_rejects_command_injection_path() {
         SshConfig::default(),
         false,
         Arc::new(HandshakeStore::default()),
+        4 * 1024 * 1024,
+        1024,
     )
     .await
     .expect("transport");
@@ -375,6 +421,8 @@ async fn end_to_end_router_and_http_transport_forwards_valid_cmr_message() {
         SshConfig::default(),
         false,
         Arc::clone(&handshake_store),
+        4 * 1024 * 1024,
+        1024,
     )
     .await
     .expect("transport");
@@ -384,7 +432,7 @@ async fn end_to_end_router_and_http_transport_forwards_valid_cmr_message() {
         permissive_policy(),
         Oracle {
             intrinsic: 0.9,
-            ncd: 0.1,
+            distance: 0.1,
         },
     );
 

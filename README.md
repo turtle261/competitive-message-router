@@ -26,15 +26,15 @@ This project implements the CMR protocol defined in `agi2.html` as a Rust worksp
 ## Implemented CMR Pieces
 
 - Message format (signature/header/body) and strict validation.
-- Router behavior: accept/reject, cache, exact Section 3.2 compression-difference routing (`D(X, Y) = C(XY)-C(X)+C(YX)-C(Y)`), threshold-based multi-match forwarding across matched headers (A3/3.3), compensatory `Z_j` replies, and per-hop re-signing.
+- Router behavior: accept/reject, cache, exact Section 3.2 compression-difference routing (`D(X, Y) = C(XY)-C(X)+C(YX)-C(Y)`), raw-distance threshold-based forwarding across individually matched messages (A3/3.3), compensatory `Z_j` replies, bounded cache eviction when limits are reached, and per-hop re-signing.
 - Transports:
-  - Server: HTTP, HTTPS, UDP.
+  - Server: HTTP, HTTPS, UDP, SMTP.
   - Client: HTTP, HTTPS, SMTP, UDP, SSH.
   - HTTP handshake (`request`/`reply`) including one-time payload store.
   - UDP service-tag framing (`udp://host:port/service`) enforced on send/receive.
   - SMTP payloads are sent as `application/octet-stream` with base64 transfer encoding.
 - Key exchange control messages:
-  - Automatic first-contact key-exchange initiation for unknown peers (RSA or DH, policy-selectable).
+  - Automatic first-contact key-exchange planning for unknown peers (RSA or DH, policy-selectable). The router emits `ClientMessagePlan`; the peer daemon client layer creates/sends the wire message.
   - RSA request/reply.
   - Diffie-Hellman request/reply.
   - Clear key exchange (only accepted over secure transport).
@@ -64,8 +64,9 @@ cmr-peer init-config --config cmr-peer.toml
 
 2. Edit `cmr-peer.toml`:
 - set `local_address` to this peer's externally reachable address.
-- set listener bind/path values in `[listen.http]`/`[listen.https]`/`[listen.udp]`.
+- set listener bind/path values in `[listen.http]`/`[listen.https]`/`[listen.udp]` (and optional `[listen.smtp]` for inbound `mailto:`).
 - keep `[compressor].command = "cmr-compressor"` unless you need a custom path.
+- dashboard defaults to disabled; if you enable it, you must set both `dashboard.auth_username` and `dashboard.auth_password`.
 
 3. Run the peer:
 
@@ -76,7 +77,7 @@ cmr-peer run --config cmr-peer.toml
 4. Optional local smoke test:
 
 ```bash
-cmr-peer self-test --config cmr-peer.toml --spawn-runtime true
+cmr-peer self-test --config cmr-peer.toml --spawn-runtime
 ```
 
 5. Optional SSH forced-command mode (ingest one message from stdin):
@@ -84,6 +85,52 @@ cmr-peer self-test --config cmr-peer.toml --spawn-runtime true
 ```bash
 cmr-peer receive-stdin --config cmr-peer.toml --transport ssh
 ```
+
+## Basic Client Usage
+
+This is the simplest end-user path using installed binaries.
+
+1. Install from crates.io (see `Install (crates.io)` above), then create config:
+
+```bash
+cmr-peer init-config --config cmr-peer.toml
+```
+
+Minimum useful local settings in `cmr-peer.toml`:
+
+```toml
+local_address = "http://127.0.0.1:4001/"
+
+[listen.http]
+bind = "127.0.0.1:4001"
+path = "/"
+```
+
+2. (Optional but recommended) enable dashboard client UI:
+
+```toml
+[dashboard]
+enabled = true
+path = "/_cmr"
+auth_username = "operator"
+auth_password = "change-me"
+```
+
+Dashboard transport/auth rules:
+- Non-localhost dashboard access requires HTTPS.
+- HTTP dashboard access is allowed only from loopback/local addresses.
+- Dashboard requests are rejected unless both basic-auth fields are configured.
+
+3. Start peer:
+
+```bash
+cmr-peer run --config cmr-peer.toml
+```
+
+4. Post and view messages:
+- Open `http://127.0.0.1:4001/_cmr` and use `Post To Message Pool`.
+- For first-hop delivery in ambient mode, set `[ambient].seed_peers` in config.
+- Local post acceptance, semantic matches, and outbound delivery are shown separately in compose results.
 
 ## Build From Source
 
@@ -135,7 +182,7 @@ CI runs a full platform matrix (Linux GNU + musl, macOS, Windows, FreeBSD/OpenBS
 ```bash
 cargo run -p cmr-peer -- init-config --config cmr-peer.toml
 cargo run -p cmr-peer -- run --config cmr-peer.toml
-cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime true
+cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime
 ```
 
 ### Optional TUI
@@ -155,10 +202,16 @@ The terminal dashboard provides high-level controls:
 
 ## Notes
 
-- SMTP inbound is typically handled by your MTA and piped to `receive-stdin`.
+- SMTP inbound can be handled by the built-in `[listen.smtp]` listener or by your MTA piping to `receive-stdin`.
 - For HTTPS listener, provide PEM cert/key paths in config.
 - Use pairwise unique shared keys per peer.
 - Mahoney's V2.2 paper seemingly includes an error suggesting insecure raw SHA256 usage. We do not implement that error. We use `HMAC-SHA256` for message authentication (not raw `SHA256(key || message)`), and `HKDF-SHA256` to derive keys from RSA/DH shared secrets.
+
+## A1 Role Boundary
+
+- Router forwarding stays A1-pure: it forwards existing messages and does not emit newly constructed wire messages.
+- When protocol control traffic is needed (for example first-contact key exchange), the router emits a `ClientMessagePlan` and the peer daemon client layer (`send_client_plan`) materializes/sends it.
+- Extensibility: alternate clients can consume `ClientMessagePlan` and apply custom send scheduling/retry/transport policy without changing core router semantics.
 
 
 ## TODO
