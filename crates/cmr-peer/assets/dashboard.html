@@ -727,7 +727,7 @@
       const main = document.getElementById("main");
       main.innerHTML = `
         <h2>Authentication Required</h2>
-        <div class="callout warn">Dashboard API returned 401 Unauthorized. Configure bearer authentication in your browser/proxy and reload this page.</div>
+        <div class="callout warn">Dashboard API returned 401 Unauthorized. Provide HTTP Basic authentication in your browser/proxy and reload this page.</div>
       `;
       setSetupBanner("Dashboard is locked until authorization is provided.");
     }

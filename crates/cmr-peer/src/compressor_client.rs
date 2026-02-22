@@ -128,7 +128,19 @@ fn sibling_worker_path(command: &str) -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
     let parent = current.parent()?;
     let candidate = parent.join(command);
-    candidate.is_file().then_some(candidate)
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    #[cfg(windows)]
+    {
+        if !command.to_ascii_lowercase().ends_with(".exe") {
+            let exe_candidate = parent.join(format!("{command}.exe"));
+            if exe_candidate.is_file() {
+                return Some(exe_candidate);
+            }
+        }
+    }
+    None
 }
 
 fn command_has_explicit_path(command: &str) -> bool {

@@ -245,12 +245,28 @@ fn apply_run_overrides(
 }
 
 fn rewrite_bind_port(bind: &str, port: u16) -> String {
-    match bind.parse::<SocketAddr>() {
+    let trimmed = bind.trim();
+    match trimmed.parse::<SocketAddr>() {
         Ok(sock) => match sock.ip() {
             IpAddr::V4(ip) => format!("{ip}:{port}"),
             IpAddr::V6(ip) => format!("[{ip}]:{port}"),
         },
-        Err(_) => format!("0.0.0.0:{port}"),
+        Err(_) => {
+            if let Some(idx) = trimmed.rfind(':') {
+                let host = trimmed[..idx].trim();
+                if host.is_empty() {
+                    return format!("127.0.0.1:{port}");
+                }
+                if host.starts_with('[') && host.ends_with(']') {
+                    return format!("{host}:{port}");
+                }
+                if host.contains(':') {
+                    return format!("[{host}]:{port}");
+                }
+                return format!("{host}:{port}");
+            }
+            format!("127.0.0.1:{port}")
+        }
     }
 }
 
@@ -324,8 +340,24 @@ fn print_startup_hints(cfg: &PeerConfig, config_path: &str, created_template: bo
         };
         eprintln!("dashboard: {url}");
     }
-    if cfg.dashboard.auth_token.is_some() {
-        eprintln!("dashboard auth enabled: use Authorization: Bearer <token>");
+    if cfg
+        .dashboard
+        .auth_username
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|v| !v.is_empty())
+        && cfg
+            .dashboard
+            .auth_password
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|v| !v.is_empty())
+    {
+        eprintln!("dashboard auth enabled: use HTTP Basic authentication");
+    } else {
+        eprintln!(
+            "dashboard security warning: auth_username/auth_password are required; dashboard requests will be denied until configured"
+        );
     }
 }
 
@@ -348,6 +380,7 @@ mod tests {
     fn rewrite_bind_port_preserves_ip_and_updates_port() {
         assert_eq!(rewrite_bind_port("0.0.0.0:8080", 4002), "0.0.0.0:4002");
         assert_eq!(rewrite_bind_port("[::1]:8080", 4002), "[::1]:4002");
+        assert_eq!(rewrite_bind_port("localhost:8080", 4002), "localhost:4002");
     }
 
     #[test]
