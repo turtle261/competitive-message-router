@@ -310,19 +310,19 @@ fn print_startup_hints(cfg: &PeerConfig, config_path: &str, created_template: bo
             };
             eprintln!("dashboard: {url}");
         }
-    } else if let Some(https) = &cfg.listen.https {
-        if let Ok(bind) = https.bind.parse::<SocketAddr>() {
-            let host = match bind.ip() {
-                IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-                IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-                ip => ip,
-            };
-            let url = match host {
-                IpAddr::V4(ip) => format!("https://{ip}:{}{}", bind.port(), dashboard_path),
-                IpAddr::V6(ip) => format!("https://[{ip}]:{}{}", bind.port(), dashboard_path),
-            };
-            eprintln!("dashboard: {url}");
-        }
+    } else if let Some(https) = &cfg.listen.https
+        && let Ok(bind) = https.bind.parse::<SocketAddr>()
+    {
+        let host = match bind.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        };
+        let url = match host {
+            IpAddr::V4(ip) => format!("https://{ip}:{}{}", bind.port(), dashboard_path),
+            IpAddr::V6(ip) => format!("https://[{ip}]:{}{}", bind.port(), dashboard_path),
+        };
+        eprintln!("dashboard: {url}");
     }
     if cfg.dashboard.auth_token.is_some() {
         eprintln!("dashboard auth enabled: use Authorization: Bearer <token>");
