@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -14,7 +14,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use cmr_core::policy::{RoutingPolicy, SecurityLevel};
 use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, TransportKind};
-use cmr_core::router::{ForwardAction, ProcessOutcome, Router};
+use cmr_core::router::{ClientMessagePlan, ForwardAction, ProcessOutcome, Router};
 use http::StatusCode;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -50,6 +50,8 @@ use crate::transport::{
 const RECENT_EVENTS_CAP: usize = 500;
 const INBOX_MESSAGES_CAP: usize = 1_000;
 const OUTBOUND_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const OUTBOUND_MAX_ATTEMPTS: u32 = 3;
+const OUTBOUND_RETRY_BASE_DELAY_MS: u64 = 120;
 
 pub(crate) type PeerBody = BoxBody<Bytes, Infallible>;
 
@@ -115,7 +117,7 @@ pub struct ComposeResult {
     pub destination: String,
     pub body_bytes: usize,
     pub signed: bool,
-    pub local_event: DashboardEvent,
+    pub local_event: Option<DashboardEvent>,
     pub transport_sent: bool,
     pub transport_error: Option<String>,
     pub transport_sent_count: usize,
@@ -172,6 +174,7 @@ pub struct SetupStatus {
     pub config_ready: bool,
     pub peer_join_ready: bool,
     pub first_send_ready: bool,
+    pub server_completion_saved: bool,
     pub wizard_ready: bool,
 }
 
@@ -191,6 +194,7 @@ pub(crate) struct AppState {
     peer_connect_attempts: Arc<AtomicU64>,
     compose_actions: Arc<AtomicU64>,
     compose_transport_successes: Arc<AtomicU64>,
+    setup_completion_saved: Arc<AtomicBool>,
     active_config: Arc<RwLock<PeerConfig>>,
     config_path: Option<String>,
 }
@@ -298,14 +302,25 @@ impl AppState {
         let config_ready = self.config_path.is_some();
         let peer_join_ready = peer_count > 0 || self.peer_connect_attempts() > 0;
         let first_send_ready = setup_first_send_ready(self.compose_transport_successes());
-        let node_health_ready = self.ingest_enabled() || self.transport_enabled();
+        let has_listener = self.config_snapshot().is_some_and(|cfg| {
+            cfg.listen.http.is_some()
+                || cfg.listen.https.is_some()
+                || cfg.listen.udp.is_some()
+                || cfg.listen.smtp.is_some()
+        });
+        let node_health_ready = has_listener && (self.ingest_enabled() || self.transport_enabled());
         Ok(SetupStatus {
             node_health_ready,
             config_ready,
             peer_join_ready,
             first_send_ready,
+            server_completion_saved: self.setup_completion_saved.load(Ordering::Relaxed),
             wizard_ready: node_health_ready && config_ready && peer_join_ready && first_send_ready,
         })
+    }
+
+    pub(crate) fn set_setup_completion_saved(&self, saved: bool) {
+        self.setup_completion_saved.store(saved, Ordering::Relaxed);
     }
 
     pub(crate) async fn send_message_to_destination(
@@ -347,6 +362,15 @@ impl AppState {
             ));
         }
         let mode_lc = mode.to_ascii_lowercase();
+        if mode_lc == "clear" {
+            let parsed = url::Url::parse(peer)
+                .map_err(|err| AppError::Runtime(format!("invalid peer URL: {err}")))?;
+            if !matches!(parsed.scheme(), "https" | "ssh") {
+                return Err(AppError::Runtime(
+                    "clear key exchange requires https:// or ssh:// destination".to_owned(),
+                ));
+            }
+        }
         let now = CmrTimestamp::now_utc();
         let action = {
             let mut guard = self
@@ -493,7 +517,15 @@ impl AppState {
 
         let message = self.build_ui_message(body_text.into_bytes())?;
         let payload = message.to_bytes();
-        let local_event = self.inject_local_message(payload.clone()).await?;
+        let local_event = if self.ingest_enabled() {
+            Some(self.inject_local_message(payload.clone()).await?)
+        } else {
+            self.router_mut(|router| {
+                router.cache_local_client_message(&payload, CmrTimestamp::now_utc())
+            })?
+            .map_err(|err| AppError::Runtime(format!("local client cache insert failed: {err}")))?;
+            None
+        };
         self.compose_actions.fetch_add(1, Ordering::Relaxed);
 
         let mut unique_destinations = Vec::new();
@@ -515,7 +547,9 @@ impl AppState {
             unique_destinations = self.known_peer_destinations()?;
         }
         if unique_destinations.is_empty() {
-            return Err(AppError::Runtime("no destinations resolved".to_owned()));
+            return Err(AppError::Runtime(
+                "no destinations resolved (provide a destination, connect a peer, or configure static_keys peers)".to_owned(),
+            ));
         }
 
         let mut deliveries = Vec::with_capacity(unique_destinations.len());
@@ -657,31 +691,41 @@ impl AppState {
             best_distance_raw = diag.best_distance_raw;
             best_distance_normalized = diag.best_distance_normalized;
         }
-        let event = DashboardEvent {
-            id,
-            ts: CmrTimestamp::now_utc().to_string(),
-            accepted: outcome.accepted,
-            drop_reason: outcome.drop_reason.as_ref().map(ToString::to_string),
-            sender,
-            intrinsic_dependence: outcome.intrinsic_dependence,
-            matched_count: outcome.matched_count,
-            key_exchange_control: outcome.key_exchange_control,
-            best_peer,
-            best_distance_raw,
-            best_distance_normalized,
-            threshold_raw,
-            threshold_normalized,
-            threshold_mode,
-            forwards: outcome
-                .forwards
-                .iter()
-                .map(|f| DashboardForwardSummary {
-                    destination: f.destination.clone(),
-                    reason: format!("{:?}", f.reason),
-                })
-                .collect(),
-            transport: transport_kind_label(transport_kind),
-        };
+        let event =
+            DashboardEvent {
+                id,
+                ts: CmrTimestamp::now_utc().to_string(),
+                accepted: outcome.accepted,
+                drop_reason: outcome.drop_reason.as_ref().map(ToString::to_string),
+                sender,
+                intrinsic_dependence: outcome.intrinsic_dependence,
+                matched_count: outcome.matched_count,
+                key_exchange_control: outcome.key_exchange_control,
+                best_peer,
+                best_distance_raw,
+                best_distance_normalized,
+                threshold_raw,
+                threshold_normalized,
+                threshold_mode,
+                forwards: {
+                    let mut summaries = outcome
+                        .forwards
+                        .iter()
+                        .map(|f| DashboardForwardSummary {
+                            destination: f.destination.clone(),
+                            reason: format!("{:?}", f.reason),
+                        })
+                        .collect::<Vec<_>>();
+                    summaries.extend(outcome.client_plans.iter().map(|plan| {
+                        DashboardForwardSummary {
+                            destination: plan.destination.clone(),
+                            reason: format!("{:?} (client)", plan.reason),
+                        }
+                    }));
+                    summaries
+                },
+                transport: transport_kind_label(transport_kind),
+            };
         self.record_inbox_message(&event, outcome);
         self.update_peer_live_stats(&event);
         if let Ok(mut queue) = self.recent_events.write() {
@@ -740,26 +784,31 @@ impl AppState {
 
         if execute_forwards {
             for forward in outcome.forwards.clone() {
-                let state = self.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = state.send_forward(&forward).await {
-                        let err_text = err.to_string();
-                        let hint = if err_text.contains("upload failed with status 404") {
-                            " (hint: destination path may not match peer ingest path)"
-                        } else if (err_text.contains("Connection refused")
-                            || err_text.contains("connection refused"))
-                            && forward.destination.contains("localhost")
-                        {
-                            " (hint: for local testing use 127.0.0.1 instead of localhost)"
-                        } else {
-                            ""
-                        };
-                        eprintln!(
-                            "forward to {} failed (reason={:?}): {}{}",
-                            forward.destination, forward.reason, err_text, hint
-                        );
-                    }
-                });
+                if let Err(err) = self.send_forward(&forward).await {
+                    let err_text = err.to_string();
+                    let hint = if err_text.contains("upload failed with status 404") {
+                        " (hint: destination path may not match peer ingest path)"
+                    } else if (err_text.contains("Connection refused")
+                        || err_text.contains("connection refused"))
+                        && forward.destination.contains("localhost")
+                    {
+                        " (hint: for local testing use 127.0.0.1 instead of localhost)"
+                    } else {
+                        ""
+                    };
+                    eprintln!(
+                        "forward to {} failed (reason={:?}): {}{}",
+                        forward.destination, forward.reason, err_text, hint
+                    );
+                }
+            }
+            for plan in outcome.client_plans.clone() {
+                if let Err(err) = self.send_client_plan(&plan).await {
+                    eprintln!(
+                        "client message send to {} failed (reason={:?}): {}",
+                        plan.destination, plan.reason, err
+                    );
+                }
             }
         }
         let event = self.record_event(&outcome, &transport_kind);
@@ -772,20 +821,82 @@ impl AppState {
                 "transport plane is disabled (cannot send forward action)".to_owned(),
             ));
         }
-        match tokio::time::timeout(
-            OUTBOUND_SEND_TIMEOUT,
-            self.transport
-                .send_message(&forward.destination, &forward.message_bytes),
+        self.send_with_retry(
+            &forward.destination,
+            &forward.message_bytes,
+            "forward send",
+            OUTBOUND_MAX_ATTEMPTS,
         )
-        .await
-        {
-            Ok(result) => result.map_err(AppError::Transport),
-            Err(_) => Err(AppError::Runtime(format!(
-                "forward send to {} timed out after {}s",
-                forward.destination,
-                OUTBOUND_SEND_TIMEOUT.as_secs()
-            ))),
+        .await?;
+        self.router_mut(|router| {
+            router.record_successful_outbound(&forward.destination, forward.message_bytes.len());
+        })?;
+        Ok(())
+    }
+
+    async fn send_client_plan(&self, plan: &ClientMessagePlan) -> Result<(), AppError> {
+        if !self.transport_enabled() {
+            return Err(AppError::Runtime(
+                "transport plane is disabled (cannot send client action)".to_owned(),
+            ));
         }
+        let payload = self.render_client_plan_payload(plan)?;
+        self.router_mut(|router| {
+            router.cache_local_client_message(&payload, CmrTimestamp::now_utc())
+        })?
+        .map_err(|err| AppError::Runtime(format!("local client cache insert failed: {err}")))?;
+        self.send_with_retry(
+            &plan.destination,
+            &payload,
+            "client message send",
+            OUTBOUND_MAX_ATTEMPTS,
+        )
+        .await?;
+        self.router_mut(|router| {
+            router.record_successful_outbound(&plan.destination, payload.len());
+        })?;
+        Ok(())
+    }
+
+    async fn send_with_retry(
+        &self,
+        destination: &str,
+        payload: &[u8],
+        context: &str,
+        max_attempts: u32,
+    ) -> Result<(), AppError> {
+        let mut last_error: Option<AppError> = None;
+        let attempts = max_attempts.max(1);
+        for attempt in 1..=attempts {
+            let send = tokio::time::timeout(
+                OUTBOUND_SEND_TIMEOUT,
+                self.transport.send_message(destination, payload),
+            )
+            .await;
+            match send {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(err)) => {
+                    last_error = Some(AppError::Transport(err));
+                }
+                Err(_) => {
+                    last_error = Some(AppError::Runtime(format!(
+                        "{context} to {destination} timed out after {}s",
+                        OUTBOUND_SEND_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+            if attempt < attempts {
+                let delay_ms = OUTBOUND_RETRY_BASE_DELAY_MS
+                    .saturating_mul(u64::from(attempt))
+                    .min(2_000);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            AppError::Runtime(format!(
+                "{context} to {destination} failed with unknown transport error"
+            ))
+        }))
     }
 
     fn build_ui_message(&self, body: Vec<u8>) -> Result<CmrMessage, AppError> {
@@ -822,17 +933,39 @@ impl AppState {
         Ok(message.to_bytes())
     }
 
+    fn render_client_plan_payload(&self, plan: &ClientMessagePlan) -> Result<Vec<u8>, AppError> {
+        let guard = self
+            .router
+            .lock()
+            .map_err(|_| AppError::Runtime("router mutex poisoned".to_owned()))?;
+        let mut message = CmrMessage {
+            signature: Signature::Unsigned,
+            header: vec![MessageId {
+                timestamp: CmrTimestamp::now_utc(),
+                address: guard.local_address().to_owned(),
+            }],
+            body: plan.body.clone(),
+        };
+        if let Some(key) = plan.signing_key.as_deref() {
+            message.sign_with_key(key);
+        }
+        Ok(message.to_bytes())
+    }
+
     fn known_peer_destinations(&self) -> Result<Vec<String>, AppError> {
-        self.router_snapshot(|router| {
-            let mut peers = router
+        let mut peers = self.router_snapshot(|router| {
+            router
                 .peer_snapshots()
                 .into_iter()
                 .map(|snapshot| snapshot.peer)
-                .collect::<Vec<_>>();
-            peers.sort();
-            peers.dedup();
-            peers
-        })
+                .collect::<Vec<_>>()
+        })?;
+        if let Some(cfg) = self.config_snapshot() {
+            peers.extend(cfg.static_keys.into_iter().map(|entry| entry.peer));
+        }
+        peers.sort();
+        peers.dedup();
+        Ok(peers)
     }
 
     fn record_inbox_message(&self, event: &DashboardEvent, outcome: &ProcessOutcome) {
@@ -1105,14 +1238,7 @@ pub async fn ingest_stdin_once(
 ) -> Result<(), AppError> {
     let policy: RoutingPolicy = config.effective_policy();
     let max_bytes = policy.content.max_message_bytes;
-    let compressor_cfg = CompressorClientConfig {
-        command: config.compressor.command.clone(),
-        args: config.compressor.args.clone(),
-        max_frame_bytes: config.compressor.max_frame_bytes,
-    };
-    let compressor = CompressorClient::new(compressor_cfg)?;
-    let mut router = Router::new(config.local_address.clone(), policy, compressor);
-    apply_static_keys(&mut router, &config)?;
+    let state = build_app_state(&config, None).await?;
 
     let payload = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, std::io::Error> {
         let mut payload = Vec::new();
@@ -1129,7 +1255,9 @@ pub async fn ingest_stdin_once(
             "stdin message exceeds configured max_message_bytes ({max_bytes})"
         )));
     }
-    let outcome = router.process_incoming(&payload, transport, CmrTimestamp::now_utc());
+    let (outcome, _) = state
+        .process_payload(payload, transport, false, true, false)
+        .await?;
     if !outcome.accepted {
         return Err(AppError::Runtime(format!(
             "stdin message rejected: {}",
@@ -1137,6 +1265,12 @@ pub async fn ingest_stdin_once(
                 .drop_reason
                 .map_or_else(|| "unknown".to_owned(), |e| e.to_string())
         )));
+    }
+    for forward in &outcome.forwards {
+        state.send_forward(forward).await?;
+    }
+    for plan in &outcome.client_plans {
+        state.send_client_plan(plan).await?;
     }
     Ok(())
 }
@@ -1185,6 +1319,7 @@ async fn build_app_state(
         peer_connect_attempts: Arc::new(AtomicU64::new(0)),
         compose_actions: Arc::new(AtomicU64::new(0)),
         compose_transport_successes: Arc::new(AtomicU64::new(0)),
+        setup_completion_saved: Arc::new(AtomicBool::new(false)),
         active_config: Arc::new(RwLock::new(config.clone())),
         config_path,
     })
@@ -1551,19 +1686,22 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut data = Vec::new();
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        let read = reader.read_line(&mut line).await.map_err(AppError::Io)?;
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(AppError::Io)?;
         if read == 0 {
             return Err(AppError::Runtime(
                 "smtp DATA terminated unexpectedly".to_owned(),
             ));
         }
-        if line == ".\r\n" || line == ".\n" || line == "." {
+        if line == b".\r\n" || line == b".\n" || line == b"." {
             break;
         }
-        let mut bytes = line.as_bytes().to_vec();
+        let mut bytes = line.clone();
         if bytes.starts_with(b"..") {
             bytes.remove(0);
         }
@@ -1776,7 +1914,7 @@ async fn handle_http_request(
             let requester = requester.clone();
             let key = key.clone();
             let validated_requester =
-                match validate_handshake_callback_request(&requester, &key, remote_ip) {
+                match validate_handshake_callback_request(&requester, &key, remote_ip).await {
                     Ok(url) => url,
                     Err(err) => {
                         eprintln!("rejecting handshake callback request: {err}");
@@ -2069,7 +2207,7 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-fn validate_handshake_callback_request(
+async fn validate_handshake_callback_request(
     requester: &str,
     key: &str,
     remote_ip: Option<IpAddr>,
@@ -2112,8 +2250,8 @@ fn validate_handshake_callback_request(
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "requester URL missing port or known default for scheme".to_owned())?;
-    let resolved = (host, port)
-        .to_socket_addrs()
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
         .map_err(|e| format!("failed to resolve requester host: {e}"))?;
     if !resolved.into_iter().any(|addr| addr.ip() == remote_ip) {
         return Err("requester host does not resolve to remote peer IP".to_owned());
@@ -2252,24 +2390,26 @@ mod tests {
         assert_eq!(url, "http://[::1]:9000/cmr");
     }
 
-    #[test]
-    fn handshake_callback_validation_accepts_matching_ip() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_callback_validation_accepts_matching_ip() {
         let out = validate_handshake_callback_request(
             "http://127.0.0.1:8080/",
             "abc123",
             Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         )
+        .await
         .expect("valid callback");
         assert_eq!(out, "http://127.0.0.1:8080/");
     }
 
-    #[test]
-    fn handshake_callback_validation_rejects_mismatched_ip_and_bad_key() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_callback_validation_rejects_mismatched_ip_and_bad_key() {
         let ip_err = validate_handshake_callback_request(
             "http://127.0.0.1:8080/",
             "abc123",
             Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3))),
         )
+        .await
         .expect_err("must reject mismatched requester IP");
         assert!(ip_err.contains("does not match remote peer IP"));
 
@@ -2278,28 +2418,31 @@ mod tests {
             "bad$key",
             Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         )
+        .await
         .expect_err("must reject invalid key");
         assert!(key_err.contains("invalid characters"));
     }
 
-    #[test]
-    fn handshake_callback_validation_accepts_domain_host_when_it_resolves_to_remote_ip() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_callback_validation_accepts_domain_host_when_it_resolves_to_remote_ip() {
         let out = validate_handshake_callback_request(
             "http://localhost:8080/",
             "abc123",
             Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         )
+        .await
         .expect("domain host should be accepted when it resolves to remote ip");
         assert_eq!(out, "http://localhost:8080/");
     }
 
-    #[test]
-    fn handshake_callback_validation_rejects_domain_host_when_resolution_mismatches() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_callback_validation_rejects_domain_host_when_resolution_mismatches() {
         let err = validate_handshake_callback_request(
             "http://localhost:8080/",
             "abc123",
             Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3))),
         )
+        .await
         .expect_err("must reject mismatched resolved IP");
         assert!(err.contains("does not resolve to remote peer IP"));
     }

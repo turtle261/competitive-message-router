@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 
 use bytes::Bytes;
 use cmr_core::policy::{RoutingPolicy, SecurityLevel};
@@ -198,9 +198,24 @@ pub(crate) async fn handle_dashboard_request(
             Err(err) => app_error_response(err),
         },
         (Method::POST, "/api/setup/complete") => match state.setup_status() {
-            Ok(status) => response_api_ok(StatusCode::OK, status),
+            Ok(status) => {
+                if status.wizard_ready {
+                    state.set_setup_completion_saved(true);
+                }
+                match state.setup_status() {
+                    Ok(updated) => response_api_ok(StatusCode::OK, updated),
+                    Err(err) => app_error_response(err),
+                }
+            }
             Err(err) => app_error_response(err),
         },
+        (Method::POST, "/api/setup/reset") => {
+            state.set_setup_completion_saved(false);
+            match state.setup_status() {
+                Ok(status) => response_api_ok(StatusCode::OK, status),
+                Err(err) => app_error_response(err),
+            }
+        }
         (Method::GET, "/api/runtime/status") => {
             let listeners = state
                 .config_snapshot()
@@ -776,7 +791,7 @@ async fn probe_peer_connectivity(peer: &str) -> PeerProbeResult {
             detail: "missing port and no default for scheme".to_owned(),
         };
     };
-    let resolved = match (host.as_str(), port).to_socket_addrs() {
+    let resolved = match tokio::net::lookup_host((host.as_str(), port)).await {
         Ok(addrs) => {
             let mut unique = BTreeSet::new();
             for addr in addrs {

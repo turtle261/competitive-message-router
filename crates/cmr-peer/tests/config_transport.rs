@@ -168,7 +168,7 @@ fn extract_payload_plain_and_multipart() {
 }
 
 #[test]
-fn handshake_store_is_one_time() {
+fn handshake_store_is_one_time_read() {
     let store = HandshakeStore::default();
     assert!(store.put("k1".to_owned(), b"hello".to_vec()));
     assert_eq!(store.take("k1").as_deref(), Some(&b"hello"[..]));

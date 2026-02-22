@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CMR Peer Operator Console</title>
+  <title>CMR Message Pool</title>
   <style>
     :root {
       --bg: #ecf3ef;
@@ -324,8 +324,8 @@
   <div class="shell">
     <header class="top">
       <div>
-        <div class="title">CMR Peer Operator Console</div>
-        <div class="subtitle">Set up one peer, join peers, route messages, and operate runtime safely.</div>
+        <div class="title">CMR Message Pool</div>
+        <div class="subtitle">Post, retrieve, and route semantically related messages across peers.</div>
       </div>
       <div class="status-row" id="globalStatus"></div>
     </header>
@@ -340,19 +340,19 @@
 
   <script>
     const TABS = [
-      ["setup", "Setup Wizard"],
+      ["compose", "Post Message"],
+      ["inbox", "Message Pool"],
+      ["routing", "Routing Trace"],
+      ["add-peer", "Connect Peer"],
       ["overview", "Overview"],
-      ["add-peer", "Add Peer"],
-      ["inbox", "Inbox"],
-      ["routing", "Routing Inspector"],
       ["peers", "Peers"],
       ["cache", "Cache"],
-      ["compose", "Compose"],
+      ["setup", "Setup"],
       ["config", "Config & Policy"],
     ];
 
     const state = {
-      activeTab: "setup",
+      activeTab: "compose",
       setup: null,
       runtime: null,
       status: null,
@@ -653,10 +653,10 @@
       banner.classList.add("visible");
     }
 
-    function mustRunWizard() {
+    function setupPending() {
       if (!state.setup) return true;
       if (!state.setup.wizard_ready) return true;
-      return !state.setupClientComplete;
+      return !(state.setupClientComplete || state.setup.server_completion_saved);
     }
 
     function setGlobalStatus() {
@@ -666,7 +666,7 @@
       const transportOn = state.runtime && state.runtime.transport_enabled;
       const peerCount = state.status ? state.status.peer_count : 0;
       const pills = [
-        setupReady ? `<span class="pill good">Setup Ready</span>` : `<span class="pill warn">Setup Required</span>`,
+        setupReady ? `<span class="pill good">Setup Ready</span>` : `<span class="pill warn">Setup Pending</span>`,
         ingestOn ? `<span class="pill good">Ingest On</span>` : `<span class="pill warn">Ingest Off</span>`,
         transportOn ? `<span class="pill good">Transport On</span>` : `<span class="pill warn">Transport Off</span>`,
         `<span class="pill">Peers ${peerCount}</span>`,
@@ -678,9 +678,7 @@
       const tabsEl = document.getElementById("tabs");
       tabsEl.innerHTML = "";
 
-      const wizardOnly = mustRunWizard();
       for (const [id, label] of TABS) {
-        if (wizardOnly && id !== "setup") continue;
         const btn = document.createElement("button");
         btn.className = `tab ${state.activeTab === id ? "active" : ""}`;
         btn.textContent = label;
@@ -748,11 +746,14 @@
       state.runtime = runtime;
       state.status = status;
       setGlobalStatus();
-      if (mustRunWizard()) {
-        if (state.setup?.wizard_ready && !state.setupClientComplete) {
-          setSetupBanner("Setup checks passed. Click Finish Setup in Step 5 to unlock the full dashboard.");
+      if (setupPending()) {
+        if (
+          state.setup?.wizard_ready &&
+          !(state.setupClientComplete || state.setup?.server_completion_saved)
+        ) {
+          setSetupBanner("Setup checks passed. Finish setup to persist operator readiness across browsers.");
         } else {
-          setSetupBanner("Setup Wizard is required before using the full dashboard.");
+          setSetupBanner("Setup is recommended for node operations. Messaging and message-pool browsing remain available.");
         }
       } else {
         setSetupBanner("");
@@ -864,7 +865,7 @@
       await ensureEditableConfig();
       const rt = state.runtime || { listeners: [], ingest_enabled: false, transport_enabled: false };
       const st = state.status || { peer_count: 0, cache_entries: 0, cache_bytes: 0 };
-      const setup = state.setup || { node_health_ready: false, config_ready: false, peer_join_ready: false, first_send_ready: false, wizard_ready: false };
+      const setup = state.setup || { node_health_ready: false, config_ready: false, peer_join_ready: false, first_send_ready: false, server_completion_saved: false, wizard_ready: false };
       const missing = [];
       if (!setup.node_health_ready) missing.push("Enable ingest or transport in Step 1.");
       if (!setup.config_ready) missing.push("Apply config from Step 2 (or run with --config path).");
@@ -957,9 +958,10 @@
             <h3>5. Ready</h3>
             <div class="row">
               ${setup.wizard_ready ? '<span class="pill good">Server readiness check passed</span>' : '<span class="pill warn">Pending checklist items</span>'}
-              ${state.setupClientComplete ? '<span class="pill good">Client completion saved</span>' : '<span class="pill warn">Client completion pending</span>'}
+              ${setup.server_completion_saved ? '<span class="pill good">Server completion saved</span>' : '<span class="pill warn">Server completion pending</span>'}
+              ${state.setupClientComplete ? '<span class="pill good">Browser completion saved</span>' : '<span class="pill warn">Browser completion pending</span>'}
             </div>
-            <div class="callout">${setup.wizard_ready ? "Completing setup saves a local browser marker. You can revisit setup later from the Setup Wizard tab." : `Still pending: ${escapeHtml(missing.join(" "))}`}</div>
+            <div class="callout">${setup.wizard_ready ? "Completing setup now saves on the server (all browsers) and in this browser for convenience." : `Still pending: ${escapeHtml(missing.join(" "))}`}</div>
             <div class="row">
               <button id="wiz_complete" class="primary" ${setup.wizard_ready ? "" : "disabled"}>Finish Setup</button>
               <button id="wiz_reset" class="warn">Reset Client Completion Marker</button>
@@ -1031,18 +1033,20 @@
           await api("/setup/complete", { method: "POST" });
           state.setupClientComplete = true;
           localStorage.setItem("cmr_setup_done_v2", "1");
-          if (!mustRunWizard()) {
-            state.activeTab = "overview";
+          if (!setupPending()) {
+            state.activeTab = "compose";
           }
           saveDrafts();
         }, true);
       };
 
       document.getElementById("wiz_reset").onclick = async () => {
-        state.setupClientComplete = false;
-        localStorage.removeItem("cmr_setup_done_v2");
-        saveDrafts();
-        await renderCurrentView();
+        await runAction("reset setup completion", async () => {
+          await api("/setup/reset", { method: "POST" });
+          state.setupClientComplete = false;
+          localStorage.removeItem("cmr_setup_done_v2");
+          saveDrafts();
+        }, true);
       };
 
       const wizMode = document.getElementById("wiz_mode");
@@ -1673,9 +1677,9 @@
     async function renderCompose() {
       const main = document.getElementById("main");
       main.innerHTML = `
-        <h2>Compose</h2>
-        <p class="meta">Inject locally for routing diagnostics, then send to destination(s). Leave destination blank for ambient mode (all known peers).</p>
-        <div class="callout space">CMR routes and retrieves semantically related messages; it does not generate new answers by itself. You should expect matched prior messages, not autonomous AI completion.</div>
+        <h2>Post To Message Pool</h2>
+        <p class="meta">Type a message to nobody in particular. Leave destination blank for ambient mode (all known peers).</p>
+        <div class="callout space">CMR is a semantic message pool: posts are routed to related peers and related prior messages come back through routing.</div>
 
         <div class="grid space">
           <div class="span-8"><label>Destination (optional)</label><input id="cp_dst" value="${escapeHtml(state.composeDestination)}" placeholder="blank = all known peers, or enter http://127.0.0.1:8081/" /></div>
@@ -1684,7 +1688,7 @@
           <div class="span-12"><label>Body</label><textarea id="cp_body">${escapeHtml(state.composeBody || "Hello from CMR.")}</textarea></div>
         </div>
 
-        <div class="row space"><button id="cp_send" class="primary">Inject + Route + Send</button></div>
+        <div class="row space"><button id="cp_send" class="primary">Post Message</button></div>
 
         <div class="space">
           <h3>Result</h3>
@@ -1918,10 +1922,6 @@
 
       renderTabs();
 
-      if (mustRunWizard()) {
-        state.activeTab = "setup";
-      }
-
       if (state.activeTab !== "routing") {
         stopRoutingStream();
       }
@@ -1956,8 +1956,8 @@
           await renderConfigPolicy();
           break;
         default:
-          state.activeTab = "setup";
-          await renderSetupWizard();
+          state.activeTab = "compose";
+          await renderCompose();
           break;
       }
     }

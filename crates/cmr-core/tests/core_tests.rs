@@ -497,6 +497,41 @@ fn router_rsa_and_dh_reply_paths_set_expected_keys() {
 }
 
 #[test]
+fn router_key_exchange_requests_emit_client_message_plan_for_reply() {
+    let mut router = Router::new(
+        "http://local/".to_owned(),
+        permissive_policy(),
+        StubOracle::ok(0.8, 0.2),
+    );
+    let mut initiator = Router::new(
+        "http://peer/".to_owned(),
+        permissive_policy(),
+        StubOracle::ok(0.8, 0.2),
+    );
+
+    let rsa_request = initiator
+        .initiate_rsa_key_exchange("http://local/", &ts("2030/01/01 00:00:00"))
+        .expect("valid rsa request");
+    let out = router.process_incoming(
+        &rsa_request.message_bytes,
+        TransportKind::Http,
+        ts("2030/01/01 00:00:10"),
+    );
+    assert!(out.accepted);
+    assert!(out.key_exchange_control);
+    assert!(out.forwards.is_empty());
+    assert_eq!(out.client_plans.len(), 1);
+    let plan = &out.client_plans[0];
+    assert_eq!(plan.destination, "http://peer/");
+    assert_eq!(plan.reason, ForwardReason::KeyExchangeReply);
+    assert!(
+        parse_key_exchange(&plan.body)
+            .expect("parse reply body")
+            .is_some_and(|msg| matches!(msg, KeyExchangeMessage::RsaReply { .. }))
+    );
+}
+
+#[test]
 fn router_rejects_weak_rsa_and_dh_request_parameters() {
     let mut router = Router::new(
         "http://local".to_owned(),
@@ -909,6 +944,30 @@ fn router_does_not_forward_to_addresses_already_present_in_forwarded_message_hea
 }
 
 #[test]
+fn router_can_match_messages_inserted_by_local_client_path() {
+    let mut policy = permissive_policy();
+    policy.spam.max_match_distance = 0.5;
+    let mut router = Router::new("http://local/".to_owned(), policy, StubOracle::ok(0.9, 0.1));
+
+    let local_seed = b"0\r\n2030/01/01 00:00:00 http://local/\r\n2029/12/31 23:59:59 http://helper/\r\n\r\n5\r\ntopic";
+    let local = router.process_local_client_message(
+        local_seed,
+        TransportKind::Http,
+        ts("2030/01/01 00:00:10"),
+    );
+    assert!(local.accepted);
+
+    let incoming = message_with_sender("http://origin/", b"topic", None, "2029/12/31 23:59:58");
+    let out = router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:11"));
+    assert!(out.accepted);
+    assert!(
+        out.forwards
+            .iter()
+            .any(|forward| forward.destination == "http://helper/")
+    );
+}
+
+#[test]
 fn router_uses_compression_distance_metric_for_matching() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
@@ -1078,7 +1137,7 @@ fn router_distance_inputs_use_full_serialized_messages() {
 }
 
 #[test]
-fn router_for_unknown_destination_emits_unsigned_forward_and_key_exchange_initiation() {
+fn router_for_unknown_destination_emits_unsigned_forward_without_router_created_messages() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
     policy.trust.max_outbound_inbound_ratio = 10.0;
@@ -1125,28 +1184,15 @@ fn router_for_unknown_destination_emits_unsigned_forward_and_key_exchange_initia
     assert!(matches!(parsed.signature, Signature::Unsigned));
     assert_eq!(parsed.body, b"topic beta");
 
-    let key_init = out
-        .forwards
-        .iter()
-        .find(|forward| {
-            forward.destination == "http://sink"
-                && forward.reason == ForwardReason::KeyExchangeInitiation
-        })
-        .expect("key exchange initiation toward sink");
-    let parsed_init = parse_message(
-        &key_init.message_bytes,
-        &ParseContext::secure(ts("2030/01/01 00:00:11"), Some("http://sink")),
-    )
-    .expect("parse key-init forward");
     assert!(
-        parse_key_exchange(&parsed_init.body)
-            .expect("parse key exchange")
-            .is_some()
+        out.forwards
+            .iter()
+            .all(|forward| forward.reason != ForwardReason::KeyExchangeInitiation)
     );
 }
 
 #[test]
-fn router_for_unknown_destination_skips_auto_key_exchange_when_unsigned_unknown_allowed() {
+fn router_for_unknown_destination_still_has_no_auto_key_exchange_when_unsigned_unknown_allowed() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
     policy.trust.max_outbound_inbound_ratio = 10.0;
