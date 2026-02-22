@@ -1602,10 +1602,10 @@ fn extract_cmr_payload_from_email(email_data: &[u8]) -> Result<Vec<u8>, String> 
             let part_encoding = part_headers
                 .get("content-transfer-encoding")
                 .map(String::as_str);
-            if let Ok(decoded) = decode_mime_transfer(part_body.as_slice(), part_encoding) {
-                if !decoded.is_empty() {
-                    return Ok(decoded);
-                }
+            if let Ok(decoded) = decode_mime_transfer(part_body.as_slice(), part_encoding)
+                && !decoded.is_empty()
+            {
+                return Ok(decoded);
             }
         }
         return Err("multipart message had no decodable CMR part".to_owned());
