@@ -26,7 +26,7 @@ This project implements the CMR protocol defined in `agi2.html` as a Rust worksp
 ## Implemented CMR Pieces
 
 - Message format (signature/header/body) and strict validation.
-- Router behavior: accept/reject, cache, exact Section 3.2 compression-difference routing (`D(X, Y) = C(XY)-C(X)+C(YX)-C(Y)`), threshold-based multi-match forwarding across matched headers (A3/3.3), compensatory `Z_j` replies, and per-hop re-signing.
+- Router behavior: accept/reject, cache, exact Section 3.2 compression-difference routing (`D(X, Y) = C(XY)-C(X)+C(YX)-C(Y)`), raw-distance threshold-based forwarding across individually matched messages (A3/3.3), compensatory `Z_j` replies, bounded cache eviction when limits are reached, and per-hop re-signing.
 - Transports:
   - Server: HTTP, HTTPS, UDP.
   - Client: HTTP, HTTPS, SMTP, UDP, SSH.

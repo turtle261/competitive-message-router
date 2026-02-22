@@ -21,6 +21,15 @@ pub enum CompressorRequest {
         /// Right payload (Y).
         right: Vec<u8>,
     },
+    /// Compute CMR Section 3.2 compression distance for chunked payloads.
+    /// Parts are concatenated logically without requiring callers to materialize
+    /// a single contiguous buffer.
+    CompressionDistanceChain {
+        /// Left payload parts in order.
+        left_parts: Vec<Vec<u8>>,
+        /// Right payload parts in order.
+        right_parts: Vec<Vec<u8>>,
+    },
     /// Compute intrinsic dependence of a sequence.
     IntrinsicDependence {
         /// Payload.

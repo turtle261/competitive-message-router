@@ -89,6 +89,8 @@ struct ConfigPayload {
     ssh_default_remote_command: String,
     dashboard_enabled: bool,
     dashboard_path: String,
+    ambient_seed_fanout: usize,
+    ambient_seed_peers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -509,6 +511,8 @@ pub(crate) async fn handle_dashboard_request(
                 ssh_default_remote_command: cfg.ssh.default_remote_command,
                 dashboard_enabled: cfg.dashboard.enabled,
                 dashboard_path: cfg.dashboard.path,
+                ambient_seed_fanout: cfg.ambient.seed_fanout,
+                ambient_seed_peers: cfg.ambient.seed_peers,
             });
             response_api_ok(StatusCode::OK, payload)
         }

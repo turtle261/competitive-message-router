@@ -14,7 +14,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use cmr_core::policy::{RoutingPolicy, SecurityLevel};
 use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, TransportKind};
-use cmr_core::router::{ClientMessagePlan, ForwardAction, ProcessOutcome, Router};
+use cmr_core::router::{ClientMessagePlan, ForwardAction, PeerSnapshot, ProcessOutcome, Router};
 use http::StatusCode;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -30,7 +30,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{broadcast, watch};
@@ -75,8 +75,6 @@ pub struct DashboardEvent {
     pub best_distance_raw: Option<f64>,
     pub best_distance_normalized: Option<f64>,
     pub threshold_raw: Option<f64>,
-    pub threshold_normalized: Option<f64>,
-    pub threshold_mode: Option<String>,
     pub forwards: Vec<DashboardForwardSummary>,
     pub transport: String,
 }
@@ -95,9 +93,7 @@ pub struct DashboardInboxMessage {
     pub matched_count: usize,
     pub best_distance_raw: Option<f64>,
     pub best_distance_normalized: Option<f64>,
-    pub threshold_mode: Option<String>,
     pub threshold_raw: Option<f64>,
-    pub threshold_normalized: Option<f64>,
     pub forwards: Vec<DashboardForwardSummary>,
 }
 
@@ -117,7 +113,13 @@ pub struct ComposeResult {
     pub destination: String,
     pub body_bytes: usize,
     pub signed: bool,
+    pub local_only: bool,
+    pub local_only_reason: Option<String>,
+    pub seed_destinations: Vec<String>,
+    pub seed_sent_count: usize,
+    pub seed_failed_count: usize,
     pub local_event: Option<DashboardEvent>,
+    pub returned_matches: Vec<ComposeMatchedMessage>,
     pub transport_sent: bool,
     pub transport_error: Option<String>,
     pub transport_sent_count: usize,
@@ -130,6 +132,20 @@ pub struct ComposeDeliveryResult {
     pub destination: String,
     pub transport_sent: bool,
     pub transport_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ComposeMatchedMessage {
+    pub sender: String,
+    pub encoded_size: usize,
+    pub body_preview: String,
+    pub body_text: String,
+}
+
+#[derive(Clone, Debug)]
+struct LocalInjectResult {
+    event: DashboardEvent,
+    returned_matches: Vec<ComposeMatchedMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +168,14 @@ pub struct EditableConfigPayload {
     pub ssh_default_remote_command: String,
     pub dashboard_enabled: bool,
     pub dashboard_path: String,
+    #[serde(default = "default_ambient_seed_fanout_ui")]
+    pub ambient_seed_fanout: usize,
+    #[serde(default)]
+    pub ambient_seed_peers: Vec<String>,
+}
+
+const fn default_ambient_seed_fanout_ui() -> usize {
+    8
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -517,7 +541,7 @@ impl AppState {
 
         let message = self.build_ui_message(body_text.into_bytes())?;
         let payload = message.to_bytes();
-        let local_event = if self.ingest_enabled() {
+        let local_result = if self.ingest_enabled() {
             Some(self.inject_local_message(payload.clone()).await?)
         } else {
             self.router_mut(|router| {
@@ -540,6 +564,16 @@ impl AppState {
             }
             if seen.insert(candidate.clone()) {
                 unique_destinations.push(candidate);
+            }
+        }
+        let mut seed_destinations = Vec::new();
+        if ambient && unique_destinations.is_empty() {
+            let resolved = self.ambient_seed_destinations()?;
+            for peer in resolved {
+                if seen.insert(peer.clone()) {
+                    seed_destinations.push(peer.clone());
+                    unique_destinations.push(peer);
+                }
             }
         }
 
@@ -589,6 +623,21 @@ impl AppState {
 
         let transport_sent_count = deliveries.iter().filter(|d| d.transport_sent).count();
         let transport_failed_count = deliveries.len().saturating_sub(transport_sent_count);
+        let local_only = ambient && unique_destinations.is_empty();
+        let local_only_reason = if local_only {
+            Some(
+                "posted locally only: no ambient seed peers are configured or currently known"
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        let seed_sent_count = deliveries
+            .iter()
+            .filter(|d| seed_destinations.iter().any(|seed| seed == &d.destination))
+            .filter(|d| d.transport_sent)
+            .count();
+        let seed_failed_count = seed_destinations.len().saturating_sub(seed_sent_count);
         if transport_sent_count > 0 {
             self.compose_transport_successes.fetch_add(
                 u64::try_from(transport_sent_count).unwrap_or(u64::MAX),
@@ -609,8 +658,8 @@ impl AppState {
                 })
         } else {
             let destination = unique_destinations.first().cloned().unwrap_or_default();
-            let transport_sent = transport_sent_count > 0;
-            let transport_error = if transport_sent {
+            let transport_sent = transport_sent_count > 0 || local_only;
+            let transport_error = if transport_sent || local_only {
                 None
             } else {
                 deliveries
@@ -631,7 +680,15 @@ impl AppState {
             destination: primary_delivery.destination.clone(),
             body_bytes: payload.len(),
             signed: sign,
-            local_event,
+            local_only,
+            local_only_reason,
+            seed_destinations,
+            seed_sent_count,
+            seed_failed_count,
+            local_event: local_result.as_ref().map(|result| result.event.clone()),
+            returned_matches: local_result
+                .as_ref()
+                .map_or_else(Vec::new, |result| result.returned_matches.clone()),
             transport_sent: primary_delivery.transport_sent,
             transport_error: primary_delivery.transport_error,
             transport_sent_count,
@@ -640,14 +697,27 @@ impl AppState {
         })
     }
 
-    pub(crate) async fn inject_local_message(
-        &self,
-        payload: Vec<u8>,
-    ) -> Result<DashboardEvent, AppError> {
-        let (_, event) = self
+    fn ambient_seed_destinations(&self) -> Result<Vec<String>, AppError> {
+        let config = self.config_snapshot().ok_or_else(|| {
+            AppError::Runtime("ambient seed resolution unavailable: missing config".to_owned())
+        })?;
+        let peers = self.router_snapshot(|router| router.peer_snapshots())?;
+        Ok(resolve_ambient_seed_destinations(&config, &peers))
+    }
+
+    async fn inject_local_message(&self, payload: Vec<u8>) -> Result<LocalInjectResult, AppError> {
+        let (outcome, event) = self
             .process_payload(payload, TransportKind::Http, true, false, true)
             .await?;
-        Ok(event)
+        let returned_matches = outcome
+            .local_matches
+            .iter()
+            .map(compose_matched_message_from_cmr)
+            .collect::<Vec<_>>();
+        Ok(LocalInjectResult {
+            event,
+            returned_matches,
+        })
     }
 
     fn record_event(
@@ -664,20 +734,12 @@ impl AppState {
             .as_ref()
             .map(CmrMessage::immediate_sender)
             .map(str::to_owned);
-        let mut threshold_mode = None;
         let mut threshold_raw = None;
-        let mut threshold_normalized = None;
         let mut best_peer = None;
         let mut best_distance_raw = None;
         let mut best_distance_normalized = None;
         if let Some(diag) = &outcome.routing_diagnostics {
-            threshold_mode = Some(if diag.used_normalized_threshold {
-                "normalized".to_owned()
-            } else {
-                "raw".to_owned()
-            });
             threshold_raw = Some(diag.threshold_raw);
-            threshold_normalized = Some(diag.threshold_normalized);
             best_peer = diag.best_peer.clone();
             best_distance_raw = diag.best_distance_raw;
             best_distance_normalized = diag.best_distance_normalized;
@@ -696,8 +758,6 @@ impl AppState {
                 best_distance_raw,
                 best_distance_normalized,
                 threshold_raw,
-                threshold_normalized,
-                threshold_mode,
                 forwards: {
                     let mut summaries = outcome
                         .forwards
@@ -966,9 +1026,7 @@ impl AppState {
             matched_count: event.matched_count,
             best_distance_raw: event.best_distance_raw,
             best_distance_normalized: event.best_distance_normalized,
-            threshold_mode: event.threshold_mode.clone(),
             threshold_raw: event.threshold_raw,
-            threshold_normalized: event.threshold_normalized,
             forwards: event.forwards.clone(),
         };
         if let Ok(mut inbox) = self.inbox_messages.write() {
@@ -996,6 +1054,56 @@ impl AppState {
                 stats.last_distance_normalized = Some(norm);
             }
         }
+    }
+}
+
+fn resolve_ambient_seed_destinations(config: &PeerConfig, peers: &[PeerSnapshot]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::<String>::new();
+    let local = config.local_address.trim_end_matches('/').to_owned();
+    let max_fanout = config.ambient.seed_fanout.clamp(1, 256);
+    let push_candidate = |candidate: &str, out: &mut Vec<String>, seen: &mut HashSet<String>| {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let normalized = trimmed.to_owned();
+        if normalized.trim_end_matches('/') == local {
+            return;
+        }
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    };
+
+    for peer in &config.ambient.seed_peers {
+        if out.len() >= max_fanout {
+            break;
+        }
+        push_candidate(peer, &mut out, &mut seen);
+    }
+    for entry in &config.static_keys {
+        if out.len() >= max_fanout {
+            break;
+        }
+        push_candidate(&entry.peer, &mut out, &mut seen);
+    }
+    for peer in peers {
+        if out.len() >= max_fanout {
+            break;
+        }
+        push_candidate(&peer.peer, &mut out, &mut seen);
+    }
+    out
+}
+
+fn compose_matched_message_from_cmr(message: &CmrMessage) -> ComposeMatchedMessage {
+    let body_text = String::from_utf8_lossy(&message.body).into_owned();
+    ComposeMatchedMessage {
+        sender: message.immediate_sender().to_owned(),
+        encoded_size: message.encoded_len(),
+        body_preview: body_text.chars().take(256).collect::<String>(),
+        body_text,
     }
 }
 
@@ -1663,31 +1771,63 @@ where
     let mut data = Vec::new();
     let mut line = Vec::new();
     loop {
-        line.clear();
-        let read = reader
-            .read_until(b'\n', &mut line)
-            .await
-            .map_err(AppError::Io)?;
-        if read == 0 {
-            return Err(AppError::Runtime(
-                "smtp DATA terminated unexpectedly".to_owned(),
-            ));
-        }
-        if line == b".\r\n" || line == b".\n" || line == b"." {
+        if !read_smtp_data_line(reader, &mut line, max_message_bytes).await? {
             break;
         }
-        let mut bytes = line.clone();
-        if bytes.starts_with(b"..") {
-            bytes.remove(0);
-        }
-        data.extend_from_slice(&bytes);
+        data.extend_from_slice(&line);
         if data.len() > max_message_bytes {
             return Err(AppError::Runtime(format!(
                 "smtp DATA exceeds max_message_bytes ({max_message_bytes})"
             )));
         }
+        line.clear();
     }
     Ok(data)
+}
+
+async fn read_smtp_data_line<R>(
+    reader: &mut BufReader<R>,
+    out: &mut Vec<u8>,
+    max_message_bytes: usize,
+) -> Result<bool, AppError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    out.clear();
+    loop {
+        let mut byte = [0_u8; 1];
+        let read = reader.read(&mut byte).await.map_err(AppError::Io)?;
+        if read == 0 {
+            if out == b"." {
+                return Ok(false);
+            }
+            return Err(AppError::Runtime(
+                "smtp DATA terminated unexpectedly".to_owned(),
+            ));
+        }
+        out.push(byte[0]);
+        if out.len() > max_message_bytes.saturating_add(2) {
+            return Err(AppError::Runtime(format!(
+                "smtp DATA line exceeds max_message_bytes ({max_message_bytes})"
+            )));
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    if out == b".\r\n" || out == b".\n" {
+        out.clear();
+        return Ok(false);
+    }
+    if out.starts_with(b"..") {
+        out.remove(0);
+    }
+    if out.len() > max_message_bytes {
+        return Err(AppError::Runtime(format!(
+            "smtp DATA exceeds max_message_bytes ({max_message_bytes})"
+        )));
+    }
+    Ok(true)
 }
 
 fn extract_cmr_payload_from_email(email_data: &[u8]) -> Result<Vec<u8>, String> {
@@ -1991,20 +2131,7 @@ fn response_with_outcome_headers(
         if let Some(norm) = diag.best_distance_normalized {
             builder = builder.header("X-CMR-Best-Distance-Norm", norm.to_string());
         }
-        builder = builder
-            .header("X-CMR-Threshold-Raw", diag.threshold_raw.to_string())
-            .header(
-                "X-CMR-Threshold-Norm",
-                diag.threshold_normalized.to_string(),
-            )
-            .header(
-                "X-CMR-Threshold-Mode",
-                if diag.used_normalized_threshold {
-                    "normalized"
-                } else {
-                    "raw"
-                },
-            );
+        builder = builder.header("X-CMR-Threshold-Raw", diag.threshold_raw.to_string());
     }
     builder
         .body(full_body(body))
@@ -2045,6 +2172,8 @@ impl EditableConfigPayload {
             ssh_default_remote_command: cfg.ssh.default_remote_command.clone(),
             dashboard_enabled: cfg.dashboard.enabled,
             dashboard_path: cfg.dashboard.path.clone(),
+            ambient_seed_fanout: cfg.ambient.seed_fanout,
+            ambient_seed_peers: cfg.ambient.seed_peers.clone(),
         }
     }
 
@@ -2105,6 +2234,13 @@ impl EditableConfigPayload {
         cfg.ssh.default_remote_command = self.ssh_default_remote_command.trim().to_owned();
         cfg.dashboard.enabled = self.dashboard_enabled;
         cfg.dashboard.path = self.dashboard_path.trim().to_owned();
+        cfg.ambient.seed_fanout = self.ambient_seed_fanout.clamp(1, 256);
+        cfg.ambient.seed_peers = self
+            .ambient_seed_peers
+            .iter()
+            .map(|peer| peer.trim().to_owned())
+            .filter(|peer| !peer.is_empty())
+            .collect();
 
         if cfg.local_address.is_empty() {
             return Err(AppError::InvalidConfig(
@@ -2339,11 +2475,16 @@ fn normalize_ingest_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
+    use cmr_core::router::PeerSnapshot;
     use std::net::IpAddr;
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    use crate::config::PeerConfig;
 
     use super::{
         extract_cmr_payload_from_email, loopback_http_target, normalize_ingest_path,
-        setup_first_send_ready, validate_handshake_callback_request,
+        read_smtp_data, resolve_ambient_seed_destinations, setup_first_send_ready,
+        validate_handshake_callback_request,
     };
 
     #[test]
@@ -2460,5 +2601,123 @@ Content-Transfer-Encoding: base64\r\n\
         let extracted =
             extract_cmr_payload_from_email(email.as_bytes()).expect("extract multipart base64");
         assert_eq!(extracted, wire);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn smtp_data_reader_unstuffs_dot_prefixed_lines() {
+        let (client, server) = tokio::io::duplex(1024);
+        let mut writer = client;
+        let mut reader = BufReader::new(server);
+        writer
+            .write_all(b"first line\r\n..second line\r\n.\r\n")
+            .await
+            .expect("write");
+        writer.shutdown().await.expect("shutdown");
+
+        let data = read_smtp_data(&mut reader, 1024).await.expect("read data");
+        assert_eq!(data, b"first line\r\n.second line\r\n");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn smtp_data_reader_rejects_unexpected_eof() {
+        let (client, server) = tokio::io::duplex(1024);
+        let mut writer = client;
+        let mut reader = BufReader::new(server);
+        writer.write_all(b"incomplete line").await.expect("write");
+        writer.shutdown().await.expect("shutdown");
+
+        let err = read_smtp_data(&mut reader, 1024)
+            .await
+            .expect_err("must reject EOF without terminator");
+        assert!(err.to_string().contains("terminated unexpectedly"));
+    }
+
+    #[test]
+    fn ambient_seed_resolution_uses_config_order_and_fanout_cap() {
+        let mut cfg = PeerConfig::from_toml_str(
+            r#"
+local_address = "http://local/"
+security_level = "strict"
+prefer_http_handshake = false
+[listen]
+[listen.http]
+bind = "127.0.0.1:8080"
+path = "/"
+"#,
+        )
+        .expect("config");
+        cfg.ambient.seed_fanout = 3;
+        cfg.ambient.seed_peers = vec!["http://seed-a/".to_owned(), "http://seed-b/".to_owned()];
+        cfg.static_keys = vec![crate::config::StaticKeyConfig {
+            peer: "http://static-1/".to_owned(),
+            hex_key: "666f6f".to_owned(),
+        }];
+        let peers = vec![
+            PeerSnapshot {
+                peer: "http://recent-1/".to_owned(),
+                reputation: 0.0,
+                inbound_messages: 0,
+                inbound_bytes: 0,
+                outbound_messages: 0,
+                outbound_bytes: 0,
+                current_window_messages: 0,
+                current_window_bytes: 0,
+                has_shared_key: false,
+                pending_key_exchange: false,
+            },
+            PeerSnapshot {
+                peer: "http://recent-2/".to_owned(),
+                reputation: 0.0,
+                inbound_messages: 0,
+                inbound_bytes: 0,
+                outbound_messages: 0,
+                outbound_bytes: 0,
+                current_window_messages: 0,
+                current_window_bytes: 0,
+                has_shared_key: false,
+                pending_key_exchange: false,
+            },
+        ];
+        let seeds = resolve_ambient_seed_destinations(&cfg, &peers);
+        assert_eq!(
+            seeds,
+            vec!["http://seed-a/", "http://seed-b/", "http://static-1/"]
+        );
+    }
+
+    #[test]
+    fn ambient_seed_resolution_deduplicates_and_excludes_local() {
+        let mut cfg = PeerConfig::from_toml_str(
+            r#"
+local_address = "http://local/"
+security_level = "strict"
+prefer_http_handshake = false
+[listen]
+[listen.http]
+bind = "127.0.0.1:8080"
+path = "/"
+"#,
+        )
+        .expect("config");
+        cfg.ambient.seed_fanout = 8;
+        cfg.ambient.seed_peers = vec![
+            "http://local".to_owned(),
+            "http://dup/".to_owned(),
+            "http://dup/".to_owned(),
+        ];
+        let peers = vec![PeerSnapshot {
+            peer: "http://dup/".to_owned(),
+            reputation: 0.0,
+            inbound_messages: 0,
+            inbound_bytes: 0,
+            outbound_messages: 0,
+            outbound_bytes: 0,
+            current_window_messages: 0,
+            current_window_bytes: 0,
+            has_shared_key: false,
+            pending_key_exchange: false,
+        }];
+        let seeds = resolve_ambient_seed_destinations(&cfg, &peers);
+        assert_eq!(seeds, vec!["http://dup/"]);
     }
 }

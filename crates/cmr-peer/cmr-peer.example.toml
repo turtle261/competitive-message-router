@@ -48,6 +48,12 @@ path = "/_cmr"
 # Optional bearer token required for all dashboard/API requests.
 # auth_token = "change-me"
 
+[ambient]
+# Optional first-hop peers used for blank-destination compose.
+seed_peers = []
+# Maximum ambient seed fanout per compose action.
+seed_fanout = 8
+
 # Optional static pairwise keys:
 # [[static_keys]]
 # peer = "http://peer-a.example/cmr"

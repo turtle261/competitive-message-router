@@ -115,7 +115,7 @@ fn appendix_a2_signature_v1_is_hmac_sha256_of_payload() {
 }
 
 #[test]
-fn appendix_a3_peer_corpus_match_routes_using_peer_history() {
+fn appendix_a3_peer_corpus_match_routes_only_individually_matched_messages() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;
     let mut router = Router::new("http://local/".to_owned(), policy, MarkerOracle);
@@ -148,14 +148,14 @@ fn appendix_a3_peer_corpus_match_routes_using_peer_history() {
     let incoming = message_with_sender("http://origin/", b"question", None, "2029/12/31 23:59:55");
     let out = router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
     assert!(out.accepted);
-    assert_eq!(out.matched_count, 2);
+    assert_eq!(out.matched_count, 1);
     assert!(
         out.forwards
             .iter()
             .any(|forward| forward.destination == "http://dest-near/")
     );
     assert!(
-        out.forwards
+        !out.forwards
             .iter()
             .any(|forward| forward.destination == "http://dest-far/")
     );
@@ -246,4 +246,62 @@ fn appendix_a3_forwards_rewrap_original_message_with_new_top_hop() {
     assert_eq!(parsed.header[0].address, "http://local");
     assert_eq!(parsed.header[1].address, "http://origin");
     assert_eq!(parsed.body, b"question");
+}
+
+#[test]
+fn appendix_a3_cache_may_delete_when_space_needed() {
+    let mut policy = permissive_policy();
+    policy.cache_max_messages = 2;
+    policy.cache_max_bytes = 256;
+    let mut router = Router::new("http://local".to_owned(), policy, MarkerOracle);
+
+    let m1 = message_with_sender("http://a", b"a", None, "2029/12/31 23:59:59");
+    let m2 = message_with_sender("http://b", b"b", None, "2029/12/31 23:59:58");
+    let m3 = message_with_sender("http://c", b"c", None, "2029/12/31 23:59:57");
+
+    assert!(
+        router
+            .process_incoming(&m1, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .accepted
+    );
+    assert!(
+        router
+            .process_incoming(&m2, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .accepted
+    );
+    assert!(
+        router
+            .process_incoming(&m3, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .accepted
+    );
+
+    let stats = router.cache_stats();
+    assert_eq!(stats.entry_count, 2);
+    assert!(stats.total_evictions >= 1);
+}
+
+#[test]
+fn appendix_a3_raw_threshold_remains_forwarding_gate() {
+    let mut policy = permissive_policy();
+    policy.spam.max_match_distance = 0.0;
+    let mut router = Router::new("http://local/".to_owned(), policy, MarkerOracle);
+
+    let seed = message_with_sender_and_prior_hop(
+        "http://peer/",
+        "http://dest-near/",
+        b"cmr:near",
+        "2029/12/31 23:59:59",
+        "2029/12/31 23:59:58",
+    );
+    assert!(
+        router
+            .process_incoming(&seed, TransportKind::Http, ts("2030/01/01 00:00:10"))
+            .accepted
+    );
+
+    let incoming = message_with_sender("http://origin/", b"question", None, "2029/12/31 23:59:55");
+    let out = router.process_incoming(&incoming, TransportKind::Http, ts("2030/01/01 00:00:10"));
+    assert!(out.accepted);
+    assert_eq!(out.matched_count, 0);
+    assert!(out.forwards.is_empty());
 }

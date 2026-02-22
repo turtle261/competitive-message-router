@@ -7,6 +7,7 @@ use cmr_core::compressor_ipc::{
     write_frame,
 };
 use infotheory::InfotheoryCtx;
+use rayon::prelude::*;
 
 fn main() {
     let stdin = std::io::stdin();
@@ -74,6 +75,16 @@ fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResp
                 value: compression_distance(ctx, &left, &right),
             }
         }
+        CompressorRequest::CompressionDistanceChain {
+            left_parts,
+            right_parts,
+        } => {
+            let left_refs = left_parts.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let right_refs = right_parts.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            CompressorResponse::CompressionDistance {
+                value: compression_distance_chain(ctx, &left_refs, &right_refs),
+            }
+        }
         CompressorRequest::IntrinsicDependence { data, max_order } => {
             CompressorResponse::IntrinsicDependence {
                 value: ctx.intrinsic_dependence_bytes(&data, max_order),
@@ -81,7 +92,7 @@ fn handle_request(ctx: &InfotheoryCtx, req: CompressorRequest) -> CompressorResp
         }
         CompressorRequest::BatchCompressionDistance { target, candidates } => {
             let values = candidates
-                .iter()
+                .par_iter()
                 .map(|candidate| compression_distance(ctx, &target, candidate))
                 .collect();
             CompressorResponse::BatchCompressionDistance { values }
@@ -94,5 +105,23 @@ fn compression_distance(ctx: &InfotheoryCtx, left: &[u8], right: &[u8]) -> f64 {
     let c_right = ctx.compress_size(right) as f64;
     let c_xy = ctx.compress_size_chain(&[left, right]) as f64;
     let c_yx = ctx.compress_size_chain(&[right, left]) as f64;
+    (c_xy - c_left) + (c_yx - c_right)
+}
+
+fn compression_distance_chain(
+    ctx: &InfotheoryCtx,
+    left_parts: &[&[u8]],
+    right_parts: &[&[u8]],
+) -> f64 {
+    let c_left = ctx.compress_size_chain(left_parts) as f64;
+    let c_right = ctx.compress_size_chain(right_parts) as f64;
+    let mut xy = Vec::with_capacity(left_parts.len() + right_parts.len());
+    xy.extend_from_slice(left_parts);
+    xy.extend_from_slice(right_parts);
+    let mut yx = Vec::with_capacity(right_parts.len() + left_parts.len());
+    yx.extend_from_slice(right_parts);
+    yx.extend_from_slice(left_parts);
+    let c_xy = ctx.compress_size_chain(&xy) as f64;
+    let c_yx = ctx.compress_size_chain(&yx) as f64;
     (c_xy - c_left) + (c_yx - c_right)
 }
