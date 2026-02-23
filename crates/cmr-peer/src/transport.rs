@@ -145,6 +145,14 @@ pub enum TransportError {
     /// HTTP failure.
     #[error("http error: {0}")]
     Http(String),
+    /// HTTP upload rejected by recipient with explicit status.
+    #[error("http error: upload failed with status {status}{reason}")]
+    HttpStatus {
+        /// Numeric HTTP status code.
+        status: u16,
+        /// Optional formatted reason suffix.
+        reason: String,
+    },
     /// SMTP disabled.
     #[error("smtp transport not configured")]
     SmtpNotConfigured,
@@ -349,10 +357,34 @@ impl TransportManager {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(TransportError::Http(format!(
-                "upload failed with status {}",
-                resp.status()
-            )))
+            let status = resp.status();
+            let drop_reason = resp
+                .headers()
+                .get("x-cmr-drop-reason")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let accepted = resp
+                .headers()
+                .get("x-cmr-accepted")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            if status.as_u16() == 400
+                && drop_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason == "duplicate message id in cache")
+            {
+                return Ok(());
+            }
+            let reason = match (drop_reason, accepted) {
+                (Some(drop), Some(acc)) => format!(" (accepted={acc}, drop_reason={drop})"),
+                (Some(drop), None) => format!(" (drop_reason={drop})"),
+                (None, Some(acc)) => format!(" (accepted={acc})"),
+                (None, None) => String::new(),
+            };
+            Err(TransportError::HttpStatus {
+                status: status.as_u16(),
+                reason,
+            })
         }
     }
 

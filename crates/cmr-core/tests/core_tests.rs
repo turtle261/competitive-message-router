@@ -1071,6 +1071,54 @@ fn router_can_match_messages_inserted_by_local_client_path() {
 }
 
 #[test]
+fn router_forward_of_local_origin_keeps_unique_local_address_in_header() {
+    let mut policy = permissive_policy();
+    policy.spam.max_match_distance = 0.5;
+    policy.trust.max_outbound_inbound_ratio = 10.0;
+    let mut router = Router::new("http://local/".to_owned(), policy, StubOracle::ok(0.9, 0.1));
+
+    let seed = message_with_sender("http://sink/", b"topic", None, "2029/12/31 23:59:59");
+    let seed_out = router.process_incoming(&seed, TransportKind::Http, ts("2030/01/01 00:00:10"));
+    assert!(
+        seed_out.accepted,
+        "seed should be accepted, got: {:?}",
+        seed_out.drop_reason
+    );
+
+    let local_post = b"0\r\n2030/01/01 00:00:00 http://local/\r\n\r\n5\r\ntopic";
+    let out = router.process_local_client_message(
+        local_post,
+        TransportKind::Http,
+        ts("2030/01/01 00:00:11"),
+    );
+    assert!(out.accepted);
+
+    let forward = out
+        .forwards
+        .iter()
+        .find(|forward| {
+            forward.destination == "http://sink/"
+                && forward.reason == ForwardReason::MatchedForwardIncoming
+        })
+        .expect("expected forward to sink");
+
+    let parse_ctx = ParseContext {
+        now: ts("2030/01/01 00:00:20"),
+        recipient_address: None,
+        max_message_bytes: 4 * 1024 * 1024,
+        max_header_ids: 1024,
+    };
+    let parsed = parse_message(&forward.message_bytes, &parse_ctx)
+        .expect("forwarded wire message must be parseable");
+    let local_count = parsed
+        .header
+        .iter()
+        .filter(|id| id.address == "http://local/")
+        .count();
+    assert_eq!(local_count, 1, "forwarded header must not duplicate local hop");
+}
+
+#[test]
 fn router_local_client_post_returns_matched_messages_to_local_outcome() {
     let mut policy = permissive_policy();
     policy.spam.max_match_distance = 0.5;

@@ -933,7 +933,11 @@ impl AppState {
             match send {
                 Ok(Ok(())) => return Ok(()),
                 Ok(Err(err)) => {
+                    let should_retry = is_retryable_transport_error(&err);
                     last_error = Some(AppError::Transport(err));
+                    if !should_retry {
+                        break;
+                    }
                 }
                 Err(_) => {
                     last_error = Some(AppError::Runtime(format!(
@@ -2440,6 +2444,13 @@ async fn validate_handshake_callback_request(
     }
 
     Ok(url.to_string())
+}
+
+fn is_retryable_transport_error(err: &TransportError) -> bool {
+    match err {
+        TransportError::HttpStatus { status, .. } => *status >= 500,
+        _ => true,
+    }
 }
 
 fn load_tls_config(cert_path: &str, key_path: &str) -> Result<ServerConfig, AppError> {

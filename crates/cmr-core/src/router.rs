@@ -1685,11 +1685,13 @@ impl<O: CompressionOracle> Router<O> {
     ) -> ForwardAction {
         let mut forwarded = message.clone();
         forwarded.make_unsigned();
-        forwarded.prepend_hop(MessageId {
-            timestamp: self
-                .next_forward_timestamp(now, message.header.first().map(|id| &id.timestamp)),
-            address: self.local_address.clone(),
-        });
+        if !self.is_local_peer_alias(forwarded.immediate_sender()) {
+            forwarded.prepend_hop(MessageId {
+                timestamp: self
+                    .next_forward_timestamp(now, message.header.first().map(|id| &id.timestamp)),
+                address: self.local_address.clone(),
+            });
+        }
         if let Some(key) = self.shared_keys.get(destination) {
             forwarded.sign_with_key(key);
         }
