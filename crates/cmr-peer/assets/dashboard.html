@@ -359,6 +359,7 @@
       configApply: null,
       policyText: "",
       policyMessage: "",
+      policyPresetSelection: "balanced",
       peerWizardResult: null,
       composeResult: null,
       composeDestination: "",
@@ -1143,11 +1144,16 @@
     }
 
     async function renderOverview() {
+      await ensureEditableConfig();
+      await ensurePolicyText();
       const events = await api("/events");
       const recent = (Array.isArray(events) ? events : []).slice(-12).reverse();
       const rt = state.runtime || { listeners: [], ingest_enabled: false, transport_enabled: false };
       const st = state.status || { peer_count: 0, known_keys: 0, pending_key_exchange: 0, cache_entries: 0, cache_bytes: 0 };
       const listeners = (rt.listeners || []).map((l) => `${l.kind.toUpperCase()} ${l.bind} ${l.route}`).join(" | ") || "No listeners";
+      const selectedPreset = ["strict", "balanced", "trusted"].includes(state.policyPresetSelection)
+        ? state.policyPresetSelection
+        : "balanced";
 
       const main = document.getElementById("main");
       main.innerHTML = `
@@ -1182,6 +1188,48 @@
             <div class="meta mono">${escapeHtml(listeners)}</div>
           </section>
 
+          <section class="span-6 panel">
+            <h3>Router Config (Safe Subset)</h3>
+            <p class="meta">Preview changes first, then apply. Apply writes backup + atomic swap and reloads policy from disk.</p>
+            ${renderConfigForm("ov_cfg", state.editableConfig)}
+            <div class="row space">
+              <button id="ov_cfg_preview">Preview Diff</button>
+              <button id="ov_cfg_apply" class="primary">Apply Config</button>
+              <button id="ov_cfg_reload" class="warn">Reload Policy from Disk</button>
+            </div>
+            <pre class="space">${escapeHtml(state.configPreview?.diff || "No config preview yet.")}</pre>
+            ${state.configApply ? `<pre class="space">${escapeHtml(JSON.stringify(state.configApply, null, 2))}</pre>` : ""}
+          </section>
+
+          <section class="span-6 panel">
+            <h3>Routing Policy</h3>
+            <p class="meta">Load a default policy, customize JSON, then save to make it take effect immediately.</p>
+            <div class="grid space">
+              <div class="span-4">
+                <label>Default Policy</label>
+                <select id="ov_policy_default">
+                  <option value="strict" ${selectedPreset === "strict" ? "selected" : ""}>strict</option>
+                  <option value="balanced" ${selectedPreset === "balanced" ? "selected" : ""}>balanced</option>
+                  <option value="trusted" ${selectedPreset === "trusted" ? "selected" : ""}>trusted</option>
+                </select>
+              </div>
+              <div class="span-8">
+                <label>Policy Actions</label>
+                <div class="row">
+                  <button id="ov_policy_load_default">Load Default into Editor</button>
+                  <button id="ov_policy_apply_default" class="warn">Apply Selected Default Now</button>
+                  <button id="ov_policy_load_current">Load Current Live Policy</button>
+                </div>
+              </div>
+            </div>
+            <label class="space">Policy JSON</label>
+            <textarea id="ov_policy_text" class="mono" style="min-height:320px">${escapeHtml(state.policyText)}</textarea>
+            <div class="row space">
+              <button id="ov_policy_save" class="primary">Save Policy (Live)</button>
+            </div>
+            <div class="callout ${state.policyMessage && state.policyMessage.startsWith("Error") ? "warn" : ""} space">${escapeHtml(state.policyMessage || "Policy editor ready.")}</div>
+          </section>
+
           <section class="span-12 panel">
             <h3>Latest Outcomes</h3>
             <div class="table-wrap">
@@ -1198,11 +1246,91 @@
           </section>
         </div>
       `;
+      attachEditingWatch(main);
 
       document.getElementById("ov_ingest_start").onclick = async () => runAction("start ingest", () => api("/runtime/ingest/start", { method: "POST" }), true);
       document.getElementById("ov_ingest_stop").onclick = async () => runAction("stop ingest", () => api("/runtime/ingest/stop", { method: "POST" }), true);
       document.getElementById("ov_transport_start").onclick = async () => runAction("enable transport", () => api("/runtime/transport/start", { method: "POST" }), true);
       document.getElementById("ov_transport_stop").onclick = async () => runAction("disable transport", () => api("/runtime/transport/stop", { method: "POST" }), true);
+
+      document.getElementById("ov_cfg_preview").onclick = async () => {
+        const payload = { config: readConfigForm("ov_cfg", state.editableConfig) };
+        await runAction("config preview", async () => {
+          state.configPreview = await api("/config/preview", { method: "POST", body: payload });
+        }, true);
+      };
+
+      document.getElementById("ov_cfg_apply").onclick = async () => {
+        const payload = { config: readConfigForm("ov_cfg", state.editableConfig) };
+        await runAction("config apply", async () => {
+          state.configApply = await api("/config/apply", { method: "POST", body: payload });
+          state.editableConfig = await api("/config/editable");
+        }, true);
+      };
+
+      document.getElementById("ov_cfg_reload").onclick = async () => {
+        await runAction("reload policy", async () => {
+          const out = await api("/runtime/reload", { method: "POST" });
+          state.policyText = JSON.stringify(out.policy, null, 2);
+          state.policyMessage = "Reloaded policy from disk.";
+        }, true);
+      };
+
+      document.getElementById("ov_policy_default").onchange = (ev) => {
+        state.policyPresetSelection = ev.target.value;
+      };
+
+      document.getElementById("ov_policy_text").oninput = (ev) => {
+        state.policyText = ev.target.value || "";
+      };
+
+      document.getElementById("ov_policy_load_default").onclick = async () => {
+        const level = document.getElementById("ov_policy_default").value || "balanced";
+        await runAction(`load ${level} default policy`, async () => {
+          const preset = await api(`/policy/preset?level=${encodeURIComponent(level)}`);
+          state.policyPresetSelection = level;
+          state.policyText = JSON.stringify(preset, null, 2);
+          state.policyMessage = `Loaded ${level} default policy into editor.`;
+        }, true);
+      };
+
+      document.getElementById("ov_policy_apply_default").onclick = async () => {
+        const level = document.getElementById("ov_policy_default").value || "balanced";
+        await runAction(`apply ${level} default policy`, async () => {
+          const preset = await api(`/policy/preset?level=${encodeURIComponent(level)}`);
+          await api("/policy", { method: "PUT", body: { policy: preset } });
+          state.policyPresetSelection = level;
+          state.policyText = JSON.stringify(preset, null, 2);
+          state.policyMessage = `Applied ${level} default policy.`;
+        }, true);
+      };
+
+      document.getElementById("ov_policy_load_current").onclick = async () => {
+        await runAction("load current policy", async () => {
+          const current = await api("/policy");
+          state.policyText = JSON.stringify(current, null, 2);
+          state.policyMessage = "Loaded current live policy.";
+        }, true);
+      };
+
+      document.getElementById("ov_policy_save").onclick = async () => {
+        const raw = (document.getElementById("ov_policy_text").value || "").trim();
+        state.policyText = raw;
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (err) {
+          state.policyMessage = `Error: Invalid JSON - ${err.message || String(err)}`;
+          await renderCurrentView();
+          return;
+        }
+        await runAction("save policy", async () => {
+          await api("/policy", { method: "PUT", body: { policy: parsed } });
+          state.policyText = JSON.stringify(parsed, null, 2);
+          state.policyMessage = "Policy saved and active in-memory.";
+        }, true);
+      };
+
       document.getElementById("ov_open_routing").onclick = async () => {
         state.activeTab = "routing";
         await renderCurrentView();
