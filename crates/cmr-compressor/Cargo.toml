@@ -12,7 +12,7 @@ keywords = ["cmr", "compression", "ipc", "routing"]
 categories = ["compression", "network-programming", "kolmogorov-complexity", "information-theory"]
 
 [dependencies]
-cmr-core = { version = "0.1.0", path = "../cmr-core" }
+cmr-core = { version = "0.3.0", path = "../cmr-core" }
 infotheory = { version = "1.0.1", default-features = false, features = ["backend-rosa", "backend-zpaq"] }
 serde_json = "1.0.145"
 rayon = "1.11.0"
