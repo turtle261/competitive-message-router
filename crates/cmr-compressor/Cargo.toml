@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/cmr-compressor"
 keywords = ["cmr", "compression", "ipc", "routing"]
-categories = ["compression", "network-programming"]
+categories = ["compression", "network-programming", "kolmogorov-complexity", "information-theory"]
 
 [dependencies]
 cmr-core = { version = "0.1.0", path = "../cmr-core" }

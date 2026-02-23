@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/cmr-peer"
 keywords = ["cmr", "peer", "routing", "daemon"]
-categories = ["network-programming", "command-line-utilities"]
+categories = ["network-programming", "command-line-utilities", "kolmogorov-complexity", "information-theory"]
 
 [dependencies]
 base64 = "0.22.1"

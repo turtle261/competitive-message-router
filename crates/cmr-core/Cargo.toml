@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/cmr-core"
 keywords = ["cmr", "routing", "protocol", "networking"]
-categories = ["network-programming", "parser-implementations"]
+categories = ["network-programming", "parser-implementations", "kolmogorov-complexity", "information-theory"]
 
 [dependencies]
 hex = "0.4.3"
