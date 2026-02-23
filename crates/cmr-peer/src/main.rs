@@ -288,9 +288,7 @@ fn print_startup_hints(cfg: &PeerConfig, config_path: &str, created_template: bo
     }
     eprintln!("using config: `{config_path}`");
     if !cfg.dashboard.enabled {
-        if !cfg.web_client.enabled {
-            return;
-        }
+        return;
     }
 
     if cfg.dashboard.enabled {
@@ -340,42 +338,6 @@ fn print_startup_hints(cfg: &PeerConfig, config_path: &str, created_template: bo
             eprintln!(
                 "dashboard security warning: auth_username/auth_password are required; dashboard requests will be denied until configured"
             );
-        }
-    }
-
-    if cfg.web_client.enabled {
-        let client_path = normalize_path_prefix(&cfg.web_client.path);
-        if let Some(http) = &cfg.listen.http {
-            if let Ok(bind) = http.bind.parse::<SocketAddr>() {
-                let host = match bind.ip() {
-                    IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-                    IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-                    ip => ip,
-                };
-                let url = match host {
-                    IpAddr::V4(ip) => format!("http://{ip}:{}{}", bind.port(), client_path),
-                    IpAddr::V6(ip) => format!("http://[{ip}]:{}{}", bind.port(), client_path),
-                };
-                eprintln!("client ui: {url}");
-            }
-        } else if let Some(https) = &cfg.listen.https
-            && let Ok(bind) = https.bind.parse::<SocketAddr>()
-        {
-            let host = match bind.ip() {
-                IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-                IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-                ip => ip,
-            };
-            let url = match host {
-                IpAddr::V4(ip) => format!("https://{ip}:{}{}", bind.port(), client_path),
-                IpAddr::V6(ip) => format!("https://[{ip}]:{}{}", bind.port(), client_path),
-            };
-            eprintln!("client ui: {url}");
-        }
-        if cfg.web_client.require_https {
-            eprintln!("client ui security: HTTPS required for non-loopback access");
-        } else {
-            eprintln!("client ui security warning: non-HTTPS public access is allowed");
         }
     }
 }

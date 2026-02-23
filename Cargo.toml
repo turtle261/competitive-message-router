@@ -3,6 +3,7 @@ members = [
     "crates/cmr-core",
     "crates/cmr-peer",
     "crates/cmr-compressor",
+    "crates/cmr-client",
 ]
 resolver = "3"
 

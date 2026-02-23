@@ -49,12 +49,6 @@ path = "/_cmr"
 # auth_username = "operator"
 # auth_password = "change-me"
 
-[web_client]
-enabled = false
-path = "/_cmr_client"
-# Require HTTPS for non-localhost access to public client UI/API.
-require_https = true
-
 [ambient]
 # Optional first-hop peers used for blank-destination compose.
 seed_peers = []

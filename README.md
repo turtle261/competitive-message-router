@@ -7,6 +7,7 @@ This project implements the CMR protocol defined in `agi2.html` as a Rust worksp
 
 - `crates/cmr-core`: strict protocol parser/encoder, router logic, policy, key exchange.
 - `crates/cmr-peer`: network peer daemon (HTTP, HTTPS, UDP listeners; HTTP/HTTPS/SMTP/UDP/SSH outbound).
+- `crates/cmr-client`: high-level client library for composing/sending/receiving CMR messages.
 - `crates/cmr-compressor`: isolated compressor worker that uses [infotheory](https://github.com/turtle261/infotheory) for CMR compression-distance metrics and intrinsic-dependence spam mitigations.
 
 ## Security-Critical Design
@@ -66,8 +67,8 @@ cmr-peer init-config --config cmr-peer.toml
 - set `local_address` to this peer's externally reachable address.
 - set listener bind/path values in `[listen.http]`/`[listen.https]`/`[listen.udp]` (and optional `[listen.smtp]` for inbound `mailto:`).
 - keep `[compressor].command = "cmr-compressor"` unless you need a custom path.
-- dashboard defaults to disabled; if you enable it, you must set both `dashboard.auth_username` and `dashboard.auth_password`.
-- public web-client UI defaults to disabled; enable `[web_client]` to expose a client-only compose UI/API separate from operator dashboard auth.
+- dashboard support is compile-time optional and disabled by default; build `cmr-peer` with `--features dashboard` if you want operator UI routes.
+- if dashboard is enabled in config, you must set both `dashboard.auth_username` and `dashboard.auth_password`.
 
 3. Run the peer:
 
@@ -87,9 +88,9 @@ cmr-peer self-test --config cmr-peer.toml --spawn-runtime
 cmr-peer receive-stdin --config cmr-peer.toml --transport ssh
 ```
 
-## Basic Client Usage
+## Basic Client Usage (`cmr-client`)
 
-This is the simplest end-user path using installed binaries.
+Client applications are built against the `cmr-client` library. `cmr-peer` stays router-focused.
 
 1. Install from crates.io (see `Install (crates.io)` above), then create config:
 
@@ -122,28 +123,22 @@ Dashboard transport/auth rules:
 - HTTP dashboard access is allowed only from loopback/local addresses.
 - Dashboard requests are rejected unless both basic-auth fields are configured.
 
-3. (Optional) enable public web client UI (no auth):
-
-```toml
-[web_client]
-enabled = true
-path = "/_cmr_client"
-require_https = true
-```
-
-Web client transport rules:
-- `require_https = true` allows HTTP only from loopback/local addresses and requires HTTPS for non-localhost access.
-- The web client only exposes client compose endpoints and cannot access operator runtime/config controls.
-
-4. Start peer:
+3. Start peer:
 
 ```bash
 cmr-peer run --config cmr-peer.toml
 ```
 
-5. Post and view messages:
-- Open `http://127.0.0.1:4001/_cmr` and use `Post To Message Pool`.
-- Open `http://127.0.0.1:4001/_cmr_client` for client-only compose with optional per-message identity override.
+4. Use `cmr-client` from your app (or run the end-to-end example):
+
+```bash
+cargo run -p cmr-client --example alice_bob_charlie
+```
+
+This example starts a local router and three clients, then exercises the Appendix-A style flow:
+- Alice -> Bob: "What is the largest planet?"
+- Bob -> Charlie: "Alice asked a minute ago: What is the largest planet?"
+- Charlie -> Alice, Bob: "Dave said last year: Jupiter is the largest planet."
 - For first-hop delivery in ambient mode, set `[ambient].seed_peers` in config.
 - Local post acceptance, semantic matches, and outbound delivery are shown separately in compose results.
 

@@ -22,7 +22,7 @@ use url::form_urlencoded;
 use crate::app::{AppError, AppState, DashboardEvent, EditableConfigPayload, PeerBody, full_body};
 use crate::config::DashboardConfig;
 
-const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
+const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard.html");
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize)]

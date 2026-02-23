@@ -3,6 +3,5 @@
 pub mod app;
 pub mod compressor_client;
 pub mod config;
-pub mod dashboard;
+pub mod features;
 pub mod transport;
-pub mod web_client;

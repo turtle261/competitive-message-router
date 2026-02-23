@@ -218,6 +218,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "cmr-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cmr-core",
+ "cmr-peer",
+ "hex",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "lettre",
+ "rand",
+ "rustls",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "url",
+]
+
+[[package]]
 name = "cmr-compressor"
 version = "0.1.0"
 dependencies = [

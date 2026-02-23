@@ -1685,13 +1685,14 @@ impl<O: CompressionOracle> Router<O> {
     ) -> ForwardAction {
         let mut forwarded = message.clone();
         forwarded.make_unsigned();
-        if !self.is_local_peer_alias(forwarded.immediate_sender()) {
-            forwarded.prepend_hop(MessageId {
-                timestamp: self
-                    .next_forward_timestamp(now, message.header.first().map(|id| &id.timestamp)),
-                address: self.local_address.clone(),
-            });
-        }
+        forwarded
+            .header
+            .retain(|id| !self.is_local_peer_alias(id.address.as_str()));
+        forwarded.prepend_hop(MessageId {
+            timestamp: self
+                .next_forward_timestamp(now, message.header.first().map(|id| &id.timestamp)),
+            address: self.local_address.clone(),
+        });
         if let Some(key) = self.shared_keys.get(destination) {
             forwarded.sign_with_key(key);
         }
@@ -2289,5 +2290,39 @@ mod tests {
         let policy = RoutingPolicy::default();
         let router = Router::new("http://peer.example/cmr".to_owned(), policy, StubOracle);
         assert!(router.is_local_peer_alias("http://peer.example/cmr/inbox"));
+    }
+
+    #[test]
+    fn forward_prepends_local_hop_even_for_local_origin_sender() {
+        let policy = RoutingPolicy::default();
+        let mut router = Router::new("http://bob".to_owned(), policy, StubOracle);
+        let message = CmrMessage {
+            signature: Signature::Unsigned,
+            header: vec![MessageId {
+                timestamp: CmrTimestamp::parse("2029/12/31 23:59:59").expect("timestamp"),
+                address: "http://bob".to_owned(),
+            }],
+            body: b"hello".to_vec(),
+        };
+        let action = router.wrap_and_forward(
+            &message,
+            "http://alice",
+            &CmrTimestamp::parse("2030/01/01 00:00:10").expect("now"),
+            ForwardReason::MatchedForwardIncoming,
+        );
+        let parse_ctx = ParseContext {
+            now: CmrTimestamp::parse("2031/01/01 00:00:10").expect("parse now"),
+            recipient_address: None,
+            max_message_bytes: 4 * 1024 * 1024,
+            max_header_ids: 1024,
+        };
+        let parsed = parse_message(&action.message_bytes, &parse_ctx).expect("parse forward");
+        assert_eq!(parsed.immediate_sender(), "http://bob");
+        let local_count = parsed
+            .header
+            .iter()
+            .filter(|id| id.address == "http://bob")
+            .count();
+        assert_eq!(local_count, 1);
     }
 }

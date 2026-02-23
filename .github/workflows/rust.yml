@@ -62,6 +62,10 @@ jobs:
           cargo test --workspace --locked
           cargo test --workspace --all-features --locked
 
+      - name: Run cmr-client example (stable)
+        if: matrix.toolchain == 'stable'
+        run: cargo run -p cmr-client --example alice_bob_charlie --locked
+
       - name: Docs (stable)
         if: matrix.toolchain == 'stable'
         env:

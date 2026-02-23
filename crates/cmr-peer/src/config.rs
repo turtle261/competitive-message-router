@@ -41,9 +41,6 @@ pub struct PeerConfig {
     /// Embedded web dashboard settings.
     #[serde(default)]
     pub dashboard: DashboardConfig,
-    /// Public web client settings.
-    #[serde(default)]
-    pub web_client: WebClientConfig,
     /// Ambient compose seed behavior.
     #[serde(default)]
     pub ambient: AmbientConfig,
@@ -272,30 +269,6 @@ impl Default for DashboardConfig {
     }
 }
 
-/// Public web client settings.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WebClientConfig {
-    /// Enables serving public client UI and client-only APIs.
-    #[serde(default = "default_web_client_enabled")]
-    pub enabled: bool,
-    /// URL prefix for client UI and APIs.
-    #[serde(default = "default_web_client_path")]
-    pub path: String,
-    /// Require HTTPS for non-loopback access.
-    #[serde(default = "default_web_client_require_https")]
-    pub require_https: bool,
-}
-
-impl Default for WebClientConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_web_client_enabled(),
-            path: default_web_client_path(),
-            require_https: default_web_client_require_https(),
-        }
-    }
-}
-
 /// Static key binding.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StaticKeyConfig {
@@ -354,18 +327,6 @@ fn default_dashboard_enabled() -> bool {
 
 fn default_dashboard_path() -> String {
     "/_cmr".to_owned()
-}
-
-fn default_web_client_enabled() -> bool {
-    false
-}
-
-fn default_web_client_path() -> String {
-    "/_cmr_client".to_owned()
-}
-
-fn default_web_client_require_https() -> bool {
-    true
 }
 
 fn default_ambient_seed_fanout() -> usize {

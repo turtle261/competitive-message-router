@@ -1,20 +1,32 @@
 //! Peer runtime orchestration.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+#[cfg(feature = "dashboard")]
+use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(feature = "dashboard")]
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+#[cfg(feature = "dashboard")]
+use std::sync::RwLock;
+#[cfg(feature = "dashboard")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(feature = "dashboard")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use bytes::Bytes;
-use cmr_core::policy::{RoutingPolicy, SecurityLevel};
+use cmr_core::policy::RoutingPolicy;
+#[cfg(any(feature = "dashboard", test))]
+use cmr_core::policy::SecurityLevel;
 use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, TransportKind};
-use cmr_core::router::{ClientMessagePlan, ForwardAction, PeerSnapshot, ProcessOutcome, Router};
+#[cfg(feature = "dashboard")]
+use cmr_core::router::PeerSnapshot;
+use cmr_core::router::{ClientMessagePlan, ForwardAction, ProcessOutcome, Router};
 use http::StatusCode;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -24,16 +36,20 @@ use hyper::{Method, Request, Response, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+#[cfg(feature = "dashboard")]
 use rand::RngCore;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+#[cfg(feature = "dashboard")]
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{broadcast, watch};
+#[cfg(feature = "dashboard")]
+use tokio::sync::broadcast;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use url::form_urlencoded;
@@ -41,14 +57,16 @@ use url::form_urlencoded;
 use crate::compressor_client::{
     CompressorClient, CompressorClientConfig, CompressorClientInitError,
 };
-use crate::config::{HttpsListenConfig, PeerConfig, SmtpListenConfig, WebClientConfig};
-use crate::dashboard;
+use crate::config::{HttpsListenConfig, PeerConfig, SmtpListenConfig};
+#[cfg(feature = "dashboard")]
+use crate::features::dashboard;
 use crate::transport::{
     HandshakeStore, TransportError, TransportManager, extract_cmr_payload, extract_udp_payload,
 };
-use crate::web_client;
 
+#[cfg(feature = "dashboard")]
 const RECENT_EVENTS_CAP: usize = 500;
+#[cfg(feature = "dashboard")]
 const INBOX_MESSAGES_CAP: usize = 1_000;
 const OUTBOUND_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTBOUND_MAX_ATTEMPTS: u32 = 3;
@@ -57,12 +75,14 @@ const SMTP_SESSION_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) type PeerBody = BoxBody<Bytes, Infallible>;
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct DashboardForwardSummary {
     pub destination: String,
     pub reason: String,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct DashboardEvent {
     pub id: u64,
@@ -81,6 +101,7 @@ pub struct DashboardEvent {
     pub transport: String,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct DashboardInboxMessage {
     pub id: u64,
@@ -99,6 +120,7 @@ pub struct DashboardInboxMessage {
     pub forwards: Vec<DashboardForwardSummary>,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PeerLiveStats {
     pub last_event_ts: Option<String>,
@@ -107,6 +129,7 @@ pub struct PeerLiveStats {
     pub distance_hit_count: u64,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct ComposeResult {
     pub ambient: bool,
@@ -132,6 +155,7 @@ pub struct ComposeResult {
     pub deliveries: Vec<ComposeDeliveryResult>,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct ComposeDeliveryResult {
     pub destination: String,
@@ -140,6 +164,7 @@ pub struct ComposeDeliveryResult {
     pub signature_applied: bool,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct ComposeMatchedMessage {
     pub sender: String,
@@ -148,18 +173,21 @@ pub struct ComposeMatchedMessage {
     pub body_text: String,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug)]
 struct LocalInjectResult {
     event: DashboardEvent,
     returned_matches: Vec<ComposeMatchedMessage>,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug)]
 struct RenderedPayload {
     bytes: Vec<u8>,
     signature_applied: bool,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditableConfigPayload {
     pub local_address: String,
@@ -186,10 +214,12 @@ pub struct EditableConfigPayload {
     pub ambient_seed_peers: Vec<String>,
 }
 
+#[cfg(feature = "dashboard")]
 const fn default_ambient_seed_fanout_ui() -> usize {
     8
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct ConfigPreviewResult {
     pub valid: bool,
@@ -197,6 +227,7 @@ pub struct ConfigPreviewResult {
     pub candidate_toml: String,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct ConfigApplyResult {
     pub applied: bool,
@@ -204,6 +235,7 @@ pub struct ConfigApplyResult {
     pub reloaded_policy: RoutingPolicy,
 }
 
+#[cfg(feature = "dashboard")]
 #[derive(Clone, Debug, Serialize)]
 pub struct SetupStatus {
     pub node_health_ready: bool,
@@ -222,24 +254,37 @@ pub(crate) struct AppState {
     handshake_store: Arc<HandshakeStore>,
     ingest_enabled: Arc<AtomicBool>,
     transport_enabled: Arc<AtomicBool>,
+    #[cfg(feature = "dashboard")]
     event_tx: broadcast::Sender<DashboardEvent>,
+    #[cfg(feature = "dashboard")]
     event_counter: Arc<AtomicU64>,
+    #[cfg(feature = "dashboard")]
     recent_events: Arc<RwLock<VecDeque<DashboardEvent>>>,
+    #[cfg(feature = "dashboard")]
     inbox_messages: Arc<RwLock<VecDeque<DashboardInboxMessage>>>,
+    #[cfg(feature = "dashboard")]
     peer_live_stats: Arc<RwLock<HashMap<String, PeerLiveStats>>>,
+    #[cfg(feature = "dashboard")]
     peer_connect_attempts: Arc<AtomicU64>,
+    #[cfg(feature = "dashboard")]
     compose_actions: Arc<AtomicU64>,
+    #[cfg(feature = "dashboard")]
     compose_transport_successes: Arc<AtomicU64>,
+    #[cfg(feature = "dashboard")]
     setup_completion_saved: Arc<AtomicBool>,
+    #[cfg(feature = "dashboard")]
     active_config: Arc<RwLock<PeerConfig>>,
+    #[cfg(feature = "dashboard")]
     config_path: Option<String>,
 }
 
 impl AppState {
+    #[cfg(feature = "dashboard")]
     pub(crate) fn ingest_enabled(&self) -> bool {
         self.ingest_enabled.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn set_ingest_enabled(&self, enabled: bool) {
         self.ingest_enabled.store(enabled, Ordering::Relaxed);
     }
@@ -248,22 +293,26 @@ impl AppState {
         self.transport_enabled.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn set_transport_enabled(&self, enabled: bool) {
         self.transport_enabled.store(enabled, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn recent_events(&self) -> Vec<DashboardEvent> {
         self.recent_events
             .read()
             .map_or_else(|_| Vec::new(), |events| events.iter().cloned().collect())
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn inbox_messages(&self) -> Vec<DashboardInboxMessage> {
         self.inbox_messages
             .read()
             .map_or_else(|_| Vec::new(), |items| items.iter().cloned().collect())
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn inbox_message(&self, id: u64) -> Option<DashboardInboxMessage> {
         self.inbox_messages
             .read()
@@ -271,37 +320,45 @@ impl AppState {
             .and_then(|items| items.iter().find(|entry| entry.id == id).cloned())
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn peer_live_stats(&self) -> HashMap<String, PeerLiveStats> {
         self.peer_live_stats
             .read()
             .map_or_else(|_| HashMap::new(), |map| map.clone())
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn peer_connect_attempts(&self) -> u64 {
         self.peer_connect_attempts.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn compose_transport_successes(&self) -> u64 {
         self.compose_transport_successes.load(Ordering::Relaxed)
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn note_peer_connect_attempt(&self) {
         self.peer_connect_attempts.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<DashboardEvent> {
         self.event_tx.subscribe()
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn config_snapshot(&self) -> Option<PeerConfig> {
         self.active_config.read().ok().map(|cfg| cfg.clone())
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn editable_config(&self) -> Option<EditableConfigPayload> {
         self.config_snapshot()
             .map(|cfg| EditableConfigPayload::from_config(&cfg))
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn update_policy(&self, policy: RoutingPolicy) -> Result<(), AppError> {
         let mut guard = self
             .router
@@ -311,6 +368,7 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn router_snapshot<T>(
         &self,
         mut f: impl FnMut(&Router<CompressorClient>) -> T,
@@ -333,6 +391,7 @@ impl AppState {
         Ok(f(&mut guard))
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn setup_status(&self) -> Result<SetupStatus, AppError> {
         let peer_count = self.router_snapshot(|router| router.peer_count())?;
         let config_ready = self.config_path.is_some();
@@ -355,10 +414,12 @@ impl AppState {
         })
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn set_setup_completion_saved(&self, saved: bool) {
         self.setup_completion_saved.store(saved, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) async fn send_message_to_destination(
         &self,
         destination: &str,
@@ -386,6 +447,7 @@ impl AppState {
         }
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) async fn initiate_key_exchange(
         &self,
         peer: &str,
@@ -440,6 +502,7 @@ impl AppState {
         Ok(format!("{:?}", plan.reason))
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn reload_policy_from_disk(&self) -> Result<RoutingPolicy, AppError> {
         let Some(path) = &self.config_path else {
             return Err(AppError::Runtime(
@@ -462,6 +525,7 @@ impl AppState {
         Ok(effective)
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn config_preview(
         &self,
         editable: EditableConfigPayload,
@@ -490,6 +554,7 @@ impl AppState {
         })
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) fn config_apply_atomic_with_backup(
         &self,
         editable: EditableConfigPayload,
@@ -523,6 +588,7 @@ impl AppState {
         })
     }
 
+    #[cfg(feature = "dashboard")]
     pub(crate) async fn compose_and_send(
         &self,
         destination: Option<String>,
@@ -705,6 +771,7 @@ impl AppState {
         })
     }
 
+    #[cfg(feature = "dashboard")]
     fn ambient_seed_destinations(&self) -> Result<Vec<String>, AppError> {
         let config = self.config_snapshot().ok_or_else(|| {
             AppError::Runtime("ambient seed resolution unavailable: missing config".to_owned())
@@ -713,6 +780,7 @@ impl AppState {
         Ok(resolve_ambient_seed_destinations(&config, &peers))
     }
 
+    #[cfg(feature = "dashboard")]
     async fn inject_local_message(&self, payload: Vec<u8>) -> Result<LocalInjectResult, AppError> {
         let (outcome, event) = self
             .process_payload(payload, TransportKind::Http, true, false, true)
@@ -728,6 +796,7 @@ impl AppState {
         })
     }
 
+    #[cfg(feature = "dashboard")]
     fn record_event(
         &self,
         outcome: &ProcessOutcome,
@@ -802,11 +871,22 @@ impl AppState {
         payload: Vec<u8>,
         transport_kind: TransportKind,
     ) -> Result<ProcessOutcome, AppError> {
-        self.process_payload(payload, transport_kind, true, true, false)
-            .await
-            .map(|(outcome, _)| outcome)
+        #[cfg(feature = "dashboard")]
+        {
+            return self
+                .process_payload(payload, transport_kind, true, true, false)
+                .await
+                .map(|(outcome, _)| outcome);
+        }
+        #[cfg(not(feature = "dashboard"))]
+        {
+            return self
+                .process_payload(payload, transport_kind, true, true, false)
+                .await;
+        }
     }
 
+    #[cfg(feature = "dashboard")]
     async fn process_payload(
         &self,
         payload: Vec<u8>,
@@ -872,6 +952,73 @@ impl AppState {
         }
         let event = self.record_event(&outcome, &transport_kind);
         Ok((outcome, event))
+    }
+
+    #[cfg(not(feature = "dashboard"))]
+    async fn process_payload(
+        &self,
+        payload: Vec<u8>,
+        transport_kind: TransportKind,
+        execute_forwards: bool,
+        require_transport: bool,
+        local_client_origin: bool,
+    ) -> Result<ProcessOutcome, AppError> {
+        if !self.ingest_enabled.load(Ordering::Relaxed) {
+            return Err(AppError::Runtime("ingest pipeline is stopped".to_owned()));
+        }
+        if require_transport && !self.transport_enabled.load(Ordering::Relaxed) {
+            return Err(AppError::Runtime("transport plane is stopped".to_owned()));
+        }
+        let router = Arc::clone(&self.router);
+        let transport_for_router = transport_kind.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut guard = router
+                .lock()
+                .map_err(|_| AppError::Runtime("router mutex poisoned".to_owned()))?;
+            let processed = if local_client_origin {
+                guard.process_local_client_message(
+                    &payload,
+                    transport_for_router,
+                    CmrTimestamp::now_utc(),
+                )
+            } else {
+                guard.process_incoming(&payload, transport_for_router, CmrTimestamp::now_utc())
+            };
+            Ok::<_, AppError>(processed)
+        })
+        .await
+        .map_err(|e| AppError::Runtime(format!("router task join error: {e}")))??;
+
+        if execute_forwards {
+            for forward in outcome.forwards.clone() {
+                if let Err(err) = self.send_forward(&forward).await {
+                    let err_text = err.to_string();
+                    let hint = if err_text.contains("upload failed with status 404") {
+                        " (hint: destination path may not match peer ingest path)"
+                    } else if (err_text.contains("Connection refused")
+                        || err_text.contains("connection refused"))
+                        && forward.destination.contains("localhost")
+                    {
+                        " (hint: for local testing use 127.0.0.1 instead of localhost)"
+                    } else {
+                        ""
+                    };
+                    eprintln!(
+                        "forward to {} failed (reason={:?}): {}{}",
+                        forward.destination, forward.reason, err_text, hint
+                    );
+                }
+            }
+            for plan in outcome.client_plans.clone() {
+                if let Err(err) = self.send_client_plan(&plan).await {
+                    eprintln!(
+                        "client message send to {} failed (reason={:?}): {}",
+                        plan.destination, plan.reason, err
+                    );
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     async fn send_forward(&self, forward: &ForwardAction) -> Result<(), AppError> {
@@ -962,6 +1109,7 @@ impl AppState {
         }))
     }
 
+    #[cfg(feature = "dashboard")]
     fn build_ui_message(
         &self,
         body: Vec<u8>,
@@ -986,6 +1134,7 @@ impl AppState {
         })
     }
 
+    #[cfg(feature = "dashboard")]
     fn render_ui_payload_for_destination(
         &self,
         base_message: &CmrMessage,
@@ -1029,6 +1178,7 @@ impl AppState {
         Ok(message.to_bytes())
     }
 
+    #[cfg(feature = "dashboard")]
     fn record_inbox_message(&self, event: &DashboardEvent, outcome: &ProcessOutcome) {
         if !event.accepted {
             return;
@@ -1063,6 +1213,7 @@ impl AppState {
         }
     }
 
+    #[cfg(feature = "dashboard")]
     fn update_peer_live_stats(&self, event: &DashboardEvent) {
         let Some(sender) = event.sender.clone() else {
             return;
@@ -1083,6 +1234,7 @@ impl AppState {
     }
 }
 
+#[cfg(feature = "dashboard")]
 fn resolve_ambient_seed_destinations(config: &PeerConfig, peers: &[PeerSnapshot]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::<String>::new();
@@ -1123,6 +1275,7 @@ fn resolve_ambient_seed_destinations(config: &PeerConfig, peers: &[PeerSnapshot]
     out
 }
 
+#[cfg(feature = "dashboard")]
 fn compose_matched_message_from_cmr(message: &CmrMessage) -> ComposeMatchedMessage {
     let body_text = String::from_utf8_lossy(&message.body).into_owned();
     ComposeMatchedMessage {
@@ -1133,6 +1286,7 @@ fn compose_matched_message_from_cmr(message: &CmrMessage) -> ComposeMatchedMessa
     }
 }
 
+#[cfg(feature = "dashboard")]
 fn compose_primary_delivery_for_ambient(
     unique_destinations: &[String],
     deliveries: &[ComposeDeliveryResult],
@@ -1157,6 +1311,7 @@ fn compose_primary_delivery_for_ambient(
     }
 }
 
+#[cfg(feature = "dashboard")]
 fn setup_first_send_ready(compose_transport_successes: u64) -> bool {
     compose_transport_successes > 0
 }
@@ -1235,7 +1390,7 @@ pub async fn start_peer_with_config_path(
     config: PeerConfig,
     config_path: Option<String>,
 ) -> Result<PeerRuntime, AppError> {
-    validate_web_ui_paths(&config)?;
+    validate_dashboard_paths(&config)?;
     let state = build_app_state(&config, config_path).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1243,15 +1398,15 @@ pub async fn start_peer_with_config_path(
     if let Some(http_cfg) = config.listen.http.clone() {
         let listener = TcpListener::bind(&http_cfg.bind).await?;
         let state = state.clone();
+        #[cfg(feature = "dashboard")]
         let dashboard_cfg = config.dashboard.clone();
-        let web_client_cfg = config.web_client.clone();
         let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             if let Err(err) = run_http_listener(
                 listener,
                 http_cfg.path,
+                #[cfg(feature = "dashboard")]
                 dashboard_cfg,
-                web_client_cfg,
                 state,
                 false,
                 &mut local_shutdown,
@@ -1265,16 +1420,16 @@ pub async fn start_peer_with_config_path(
     if let Some(https_cfg) = config.listen.https.clone() {
         let (listener, acceptor) = bind_https_listener(&https_cfg).await?;
         let state = state.clone();
+        #[cfg(feature = "dashboard")]
         let dashboard_cfg = config.dashboard.clone();
-        let web_client_cfg = config.web_client.clone();
         let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             if let Err(err) = run_https_listener(
                 listener,
                 acceptor,
                 https_cfg.path,
+                #[cfg(feature = "dashboard")]
                 dashboard_cfg,
-                web_client_cfg,
                 state,
                 &mut local_shutdown,
             )
@@ -1393,7 +1548,15 @@ pub async fn ingest_stdin_once(
             "stdin message exceeds configured max_message_bytes ({max_bytes})"
         )));
     }
-    let (outcome, _) = state
+    #[cfg(feature = "dashboard")]
+    let outcome = {
+        let (outcome, _) = state
+            .process_payload(payload, transport, false, true, false)
+            .await?;
+        outcome
+    };
+    #[cfg(not(feature = "dashboard"))]
+    let outcome = state
         .process_payload(payload, transport, false, true, false)
         .await?;
     if !outcome.accepted {
@@ -1442,23 +1605,38 @@ async fn build_app_state(
         )
         .await?,
     );
-    let (event_tx, _) = broadcast::channel(1_024);
+    #[cfg(not(feature = "dashboard"))]
+    let _ = &config_path;
     Ok(AppState {
         router: Arc::new(Mutex::new(router)),
         transport,
         handshake_store,
         ingest_enabled: Arc::new(AtomicBool::new(true)),
         transport_enabled: Arc::new(AtomicBool::new(true)),
-        event_tx,
+        #[cfg(feature = "dashboard")]
+        event_tx: {
+            let (event_tx, _) = broadcast::channel(1_024);
+            event_tx
+        },
+        #[cfg(feature = "dashboard")]
         event_counter: Arc::new(AtomicU64::new(0)),
+        #[cfg(feature = "dashboard")]
         recent_events: Arc::new(RwLock::new(VecDeque::new())),
+        #[cfg(feature = "dashboard")]
         inbox_messages: Arc::new(RwLock::new(VecDeque::new())),
+        #[cfg(feature = "dashboard")]
         peer_live_stats: Arc::new(RwLock::new(HashMap::new())),
+        #[cfg(feature = "dashboard")]
         peer_connect_attempts: Arc::new(AtomicU64::new(0)),
+        #[cfg(feature = "dashboard")]
         compose_actions: Arc::new(AtomicU64::new(0)),
+        #[cfg(feature = "dashboard")]
         compose_transport_successes: Arc::new(AtomicU64::new(0)),
+        #[cfg(feature = "dashboard")]
         setup_completion_saved: Arc::new(AtomicBool::new(false)),
+        #[cfg(feature = "dashboard")]
         active_config: Arc::new(RwLock::new(config.clone())),
+        #[cfg(feature = "dashboard")]
         config_path,
     })
 }
@@ -1487,8 +1665,7 @@ async fn bind_https_listener(
 async fn run_http_listener(
     listener: TcpListener,
     path: String,
-    dashboard_cfg: crate::config::DashboardConfig,
-    web_client_cfg: WebClientConfig,
+    #[cfg(feature = "dashboard")] dashboard_cfg: crate::config::DashboardConfig,
     state: AppState,
     is_https: bool,
     shutdown: &mut watch::Receiver<bool>,
@@ -1504,16 +1681,16 @@ async fn run_http_listener(
                 let (stream, remote_addr) = accepted?;
                 let state = state.clone();
                 let path = path.clone();
+                #[cfg(feature = "dashboard")]
                 let dashboard_cfg = dashboard_cfg.clone();
-                let web_client_cfg = web_client_cfg.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let service = service_fn(move |req| {
                         handle_http_request(
                             req,
                             path.clone(),
+                            #[cfg(feature = "dashboard")]
                             dashboard_cfg.clone(),
-                            web_client_cfg.clone(),
                             state.clone(),
                             is_https,
                             Some(remote_addr.ip()),
@@ -1536,8 +1713,7 @@ async fn run_https_listener(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     path: String,
-    dashboard_cfg: crate::config::DashboardConfig,
-    web_client_cfg: WebClientConfig,
+    #[cfg(feature = "dashboard")] dashboard_cfg: crate::config::DashboardConfig,
     state: AppState,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), AppError> {
@@ -1553,8 +1729,8 @@ async fn run_https_listener(
                 let state = state.clone();
                 let acceptor = acceptor.clone();
                 let path = path.clone();
+                #[cfg(feature = "dashboard")]
                 let dashboard_cfg = dashboard_cfg.clone();
-                let web_client_cfg = web_client_cfg.clone();
                 tokio::spawn(async move {
                     let tls_stream = match acceptor.accept(stream).await {
                         Ok(s) => s,
@@ -1568,8 +1744,8 @@ async fn run_https_listener(
                         handle_http_request(
                             req,
                             path.clone(),
+                            #[cfg(feature = "dashboard")]
                             dashboard_cfg.clone(),
-                            web_client_cfg.clone(),
                             state.clone(),
                             true,
                             Some(remote_addr.ip()),
@@ -2082,8 +2258,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 async fn handle_http_request(
     req: Request<Incoming>,
     ingest_path: String,
-    dashboard_cfg: crate::config::DashboardConfig,
-    web_client_cfg: WebClientConfig,
+    #[cfg(feature = "dashboard")] dashboard_cfg: crate::config::DashboardConfig,
     state: AppState,
     is_https: bool,
     remote_ip: Option<IpAddr>,
@@ -2097,6 +2272,7 @@ async fn handle_http_request(
     let uri = req.uri().clone();
     let path = uri.path().to_owned();
 
+    #[cfg(feature = "dashboard")]
     if dashboard_cfg.enabled {
         let base = normalize_web_base_path(&dashboard_cfg.path);
         if path == base || path.starts_with(&format!("{base}/")) {
@@ -2104,20 +2280,6 @@ async fn handle_http_request(
                 req,
                 state,
                 dashboard_cfg,
-                is_https,
-                remote_ip,
-            )
-            .await;
-        }
-    }
-
-    if web_client_cfg.enabled {
-        let base = normalize_web_base_path(&web_client_cfg.path);
-        if path == base || path.starts_with(&format!("{base}/")) {
-            return web_client::handle_client_request(
-                req,
-                state,
-                web_client_cfg,
                 is_https,
                 remote_ip,
             )
@@ -2210,6 +2372,7 @@ async fn handle_http_request(
     Ok(response(StatusCode::NOT_FOUND, Bytes::new()))
 }
 
+#[cfg(any(feature = "dashboard", test))]
 fn normalize_web_base_path(path: &str) -> String {
     if path.is_empty() || path == "/" {
         "/".to_owned()
@@ -2262,6 +2425,7 @@ pub(crate) fn full_body(body: Bytes) -> PeerBody {
     Full::new(body).boxed()
 }
 
+#[cfg(feature = "dashboard")]
 impl EditableConfigPayload {
     #[must_use]
     pub fn from_config(cfg: &PeerConfig) -> Self {
@@ -2368,6 +2532,8 @@ impl EditableConfigPayload {
     }
 }
 
+#[cfg(any(feature = "dashboard", test))]
+#[cfg(feature = "dashboard")]
 fn parse_security_level(value: &str) -> Result<SecurityLevel, AppError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "strict" => Ok(SecurityLevel::Strict),
@@ -2379,6 +2545,7 @@ fn parse_security_level(value: &str) -> Result<SecurityLevel, AppError> {
     }
 }
 
+#[cfg(any(feature = "dashboard", test))]
 fn validate_client_identity(identity: &str) -> Result<String, AppError> {
     let trimmed = identity.trim();
     if trimmed.is_empty() {
@@ -2399,43 +2566,34 @@ fn validate_client_identity(identity: &str) -> Result<String, AppError> {
     Ok(trimmed.to_owned())
 }
 
-fn validate_web_ui_paths(config: &PeerConfig) -> Result<(), AppError> {
-    let dashboard_path = config
-        .dashboard
-        .enabled
-        .then(|| normalize_web_base_path(&config.dashboard.path));
-    let client_path = config
-        .web_client
-        .enabled
-        .then(|| normalize_web_base_path(&config.web_client.path));
+fn validate_dashboard_paths(config: &PeerConfig) -> Result<(), AppError> {
+    if !config.dashboard.enabled {
+        return Ok(());
+    }
 
-    if let (Some(dashboard_path), Some(client_path)) = (&dashboard_path, &client_path)
-        && paths_overlap(dashboard_path, client_path)
+    #[cfg(not(feature = "dashboard"))]
     {
-        return Err(AppError::InvalidConfig(format!(
-            "dashboard.path (`{dashboard_path}`) and web_client.path (`{client_path}`) must not overlap when both UIs are enabled"
-        )));
+        return Err(AppError::InvalidConfig(
+            "dashboard.enabled=true requires cmr-peer to be built with the `dashboard` feature"
+                .to_owned(),
+        ));
     }
 
-    for ingest_path in ingest_paths(config) {
-        if let Some(dashboard_path) = &dashboard_path
-            && path_is_routed_by_base(&ingest_path, dashboard_path)
-        {
-            return Err(AppError::InvalidConfig(format!(
-                "dashboard.path (`{dashboard_path}`) captures ingest path (`{ingest_path}`); choose a non-overlapping dashboard path"
-            )));
+    #[cfg(feature = "dashboard")]
+    {
+        let dashboard_path = normalize_web_base_path(&config.dashboard.path);
+        for ingest_path in ingest_paths(config) {
+            if path_is_routed_by_base(&ingest_path, &dashboard_path) {
+                return Err(AppError::InvalidConfig(format!(
+                    "dashboard.path (`{dashboard_path}`) captures ingest path (`{ingest_path}`); choose a non-overlapping dashboard path"
+                )));
+            }
         }
-        if let Some(client_path) = &client_path
-            && path_is_routed_by_base(&ingest_path, client_path)
-        {
-            return Err(AppError::InvalidConfig(format!(
-                "web_client.path (`{client_path}`) captures ingest path (`{ingest_path}`); choose a non-overlapping web client path"
-            )));
-        }
+        Ok(())
     }
-    Ok(())
 }
 
+#[cfg(feature = "dashboard")]
 fn ingest_paths(config: &PeerConfig) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(http) = config.listen.http.as_ref() {
@@ -2447,14 +2605,12 @@ fn ingest_paths(config: &PeerConfig) -> Vec<String> {
     out
 }
 
+#[cfg(feature = "dashboard")]
 fn path_is_routed_by_base(path: &str, base: &str) -> bool {
     path == base || path.starts_with(&format!("{base}/"))
 }
 
-fn paths_overlap(left: &str, right: &str) -> bool {
-    path_is_routed_by_base(left, right) || path_is_routed_by_base(right, left)
-}
-
+#[cfg(feature = "dashboard")]
 fn simple_line_diff(old_text: &str, new_text: &str) -> String {
     if old_text == new_text {
         return "No changes.".to_owned();
@@ -2483,12 +2639,14 @@ fn simple_line_diff(old_text: &str, new_text: &str) -> String {
     out
 }
 
+#[cfg(feature = "dashboard")]
 fn unix_ts_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
+#[cfg(feature = "dashboard")]
 fn transport_kind_label(kind: &TransportKind) -> String {
     match kind {
         TransportKind::Http => "http".to_owned(),
@@ -2674,6 +2832,7 @@ fn normalize_ingest_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
+    #[cfg(feature = "dashboard")]
     use cmr_core::router::PeerSnapshot;
     use std::net::IpAddr;
     use tokio::io::{AsyncWriteExt, BufReader};
@@ -2681,11 +2840,15 @@ mod tests {
     use crate::config::PeerConfig;
 
     use super::{
-        ComposeDeliveryResult, compose_primary_delivery_for_ambient,
         extract_cmr_payload_from_email, loopback_http_target, normalize_ingest_path,
-        normalize_web_base_path, read_smtp_data, resolve_ambient_seed_destinations,
-        setup_first_send_ready, validate_client_identity, validate_handshake_callback_request,
-        validate_web_ui_paths,
+        normalize_web_base_path, read_smtp_data, validate_client_identity, validate_dashboard_paths,
+        validate_handshake_callback_request,
+    };
+
+    #[cfg(feature = "dashboard")]
+    use super::{
+        ComposeDeliveryResult, compose_primary_delivery_for_ambient,
+        resolve_ambient_seed_destinations, setup_first_send_ready,
     };
 
     #[test]
@@ -2710,34 +2873,18 @@ mod tests {
     }
 
     #[test]
-    fn web_ui_paths_must_not_overlap_when_enabled() {
-        let mut cfg =
-            PeerConfig::from_toml_str(crate::config::EXAMPLE_CONFIG_TOML).expect("example config");
-        cfg.dashboard.enabled = true;
-        cfg.web_client.enabled = true;
-        cfg.dashboard.path = "/ui".to_owned();
-        cfg.web_client.path = "/ui/client".to_owned();
-        assert!(validate_web_ui_paths(&cfg).is_err());
-
-        cfg.web_client.path = "/client".to_owned();
-        assert!(validate_web_ui_paths(&cfg).is_ok());
-    }
-
-    #[test]
-    fn web_ui_paths_must_not_capture_http_or_https_ingest_routes() {
+    fn dashboard_path_must_not_capture_ingest_route() {
         let mut cfg =
             PeerConfig::from_toml_str(crate::config::EXAMPLE_CONFIG_TOML).expect("example config");
         cfg.dashboard.enabled = true;
         cfg.dashboard.path = "/".to_owned();
-        assert!(validate_web_ui_paths(&cfg).is_err());
+        assert!(validate_dashboard_paths(&cfg).is_err());
 
-        cfg.dashboard.enabled = false;
-        cfg.web_client.enabled = true;
-        cfg.web_client.path = "/".to_owned();
-        assert!(validate_web_ui_paths(&cfg).is_err());
-
-        cfg.web_client.path = "/client".to_owned();
-        assert!(validate_web_ui_paths(&cfg).is_ok());
+        cfg.dashboard.path = "/_cmr".to_owned();
+        #[cfg(feature = "dashboard")]
+        assert!(validate_dashboard_paths(&cfg).is_ok());
+        #[cfg(not(feature = "dashboard"))]
+        assert!(validate_dashboard_paths(&cfg).is_err());
     }
 
     #[test]
@@ -2810,12 +2957,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "dashboard")]
     fn setup_first_send_ready_requires_transport_success() {
         assert!(!setup_first_send_ready(0));
         assert!(setup_first_send_ready(1));
     }
 
     #[test]
+    #[cfg(feature = "dashboard")]
     fn ambient_primary_delivery_local_only_does_not_claim_transport_send() {
         let result = compose_primary_delivery_for_ambient(&[], &[], 0, true);
         assert!(!result.transport_sent);
@@ -2824,6 +2973,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "dashboard")]
     fn ambient_primary_delivery_uses_first_error_when_not_local_only() {
         let deliveries = vec![ComposeDeliveryResult {
             destination: "http://peer/".to_owned(),
@@ -2903,6 +3053,7 @@ Content-Transfer-Encoding: base64\r\n\
     }
 
     #[test]
+    #[cfg(feature = "dashboard")]
     fn ambient_seed_resolution_uses_config_order_and_fanout_cap() {
         let mut cfg = PeerConfig::from_toml_str(
             r#"
@@ -2956,6 +3107,7 @@ path = "/"
     }
 
     #[test]
+    #[cfg(feature = "dashboard")]
     fn ambient_seed_resolution_deduplicates_and_excludes_local() {
         let mut cfg = PeerConfig::from_toml_str(
             r#"
