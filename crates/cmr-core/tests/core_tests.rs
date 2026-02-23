@@ -1115,7 +1115,10 @@ fn router_forward_of_local_origin_keeps_unique_local_address_in_header() {
         .iter()
         .filter(|id| id.address == "http://local/")
         .count();
-    assert_eq!(local_count, 1, "forwarded header must not duplicate local hop");
+    assert_eq!(
+        local_count, 1,
+        "forwarded header must not duplicate local hop"
+    );
 }
 
 #[test]

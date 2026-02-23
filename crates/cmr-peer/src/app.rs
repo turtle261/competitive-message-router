@@ -962,7 +962,11 @@ impl AppState {
         }))
     }
 
-    fn build_ui_message(&self, body: Vec<u8>, identity: Option<&str>) -> Result<CmrMessage, AppError> {
+    fn build_ui_message(
+        &self,
+        body: Vec<u8>,
+        identity: Option<&str>,
+    ) -> Result<CmrMessage, AppError> {
         let guard = self
             .router
             .lock()
@@ -2396,18 +2400,59 @@ fn validate_client_identity(identity: &str) -> Result<String, AppError> {
 }
 
 fn validate_web_ui_paths(config: &PeerConfig) -> Result<(), AppError> {
-    if !(config.dashboard.enabled && config.web_client.enabled) {
-        return Ok(());
+    let dashboard_path = config
+        .dashboard
+        .enabled
+        .then(|| normalize_web_base_path(&config.dashboard.path));
+    let client_path = config
+        .web_client
+        .enabled
+        .then(|| normalize_web_base_path(&config.web_client.path));
+
+    if let (Some(dashboard_path), Some(client_path)) = (&dashboard_path, &client_path)
+        && paths_overlap(dashboard_path, client_path)
+    {
+        return Err(AppError::InvalidConfig(format!(
+            "dashboard.path (`{dashboard_path}`) and web_client.path (`{client_path}`) must not overlap when both UIs are enabled"
+        )));
     }
-    let dashboard_path = normalize_web_base_path(&config.dashboard.path);
-    let client_path = normalize_web_base_path(&config.web_client.path);
-    if dashboard_path == client_path {
-        return Err(AppError::InvalidConfig(
-            "dashboard.path and web_client.path must be different when both UIs are enabled"
-                .to_owned(),
-        ));
+
+    for ingest_path in ingest_paths(config) {
+        if let Some(dashboard_path) = &dashboard_path
+            && path_is_routed_by_base(&ingest_path, dashboard_path)
+        {
+            return Err(AppError::InvalidConfig(format!(
+                "dashboard.path (`{dashboard_path}`) captures ingest path (`{ingest_path}`); choose a non-overlapping dashboard path"
+            )));
+        }
+        if let Some(client_path) = &client_path
+            && path_is_routed_by_base(&ingest_path, client_path)
+        {
+            return Err(AppError::InvalidConfig(format!(
+                "web_client.path (`{client_path}`) captures ingest path (`{ingest_path}`); choose a non-overlapping web client path"
+            )));
+        }
     }
     Ok(())
+}
+
+fn ingest_paths(config: &PeerConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(http) = config.listen.http.as_ref() {
+        out.push(normalize_ingest_path(&http.path));
+    }
+    if let Some(https) = config.listen.https.as_ref() {
+        out.push(normalize_ingest_path(&https.path));
+    }
+    out
+}
+
+fn path_is_routed_by_base(path: &str, base: &str) -> bool {
+    path == base || path.starts_with(&format!("{base}/"))
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    path_is_routed_by_base(left, right) || path_is_routed_by_base(right, left)
 }
 
 fn simple_line_diff(old_text: &str, new_text: &str) -> String {
@@ -2511,7 +2556,11 @@ async fn validate_handshake_callback_request(
         return Err("requester host does not resolve to remote peer IP".to_owned());
     }
 
-    Ok(url.to_string())
+    let mut pinned = url;
+    pinned
+        .set_host(Some(&remote_ip.to_string()))
+        .map_err(|_| "failed to pin requester host to validated remote peer IP".to_owned())?;
+    Ok(pinned.to_string())
 }
 
 fn is_retryable_transport_error(err: &TransportError) -> bool {
@@ -2662,12 +2711,29 @@ mod tests {
 
     #[test]
     fn web_ui_paths_must_not_overlap_when_enabled() {
-        let mut cfg = PeerConfig::from_toml_str(crate::config::EXAMPLE_CONFIG_TOML)
-            .expect("example config");
+        let mut cfg =
+            PeerConfig::from_toml_str(crate::config::EXAMPLE_CONFIG_TOML).expect("example config");
         cfg.dashboard.enabled = true;
         cfg.web_client.enabled = true;
         cfg.dashboard.path = "/ui".to_owned();
-        cfg.web_client.path = "/ui/".to_owned();
+        cfg.web_client.path = "/ui/client".to_owned();
+        assert!(validate_web_ui_paths(&cfg).is_err());
+
+        cfg.web_client.path = "/client".to_owned();
+        assert!(validate_web_ui_paths(&cfg).is_ok());
+    }
+
+    #[test]
+    fn web_ui_paths_must_not_capture_http_or_https_ingest_routes() {
+        let mut cfg =
+            PeerConfig::from_toml_str(crate::config::EXAMPLE_CONFIG_TOML).expect("example config");
+        cfg.dashboard.enabled = true;
+        cfg.dashboard.path = "/".to_owned();
+        assert!(validate_web_ui_paths(&cfg).is_err());
+
+        cfg.dashboard.enabled = false;
+        cfg.web_client.enabled = true;
+        cfg.web_client.path = "/".to_owned();
         assert!(validate_web_ui_paths(&cfg).is_err());
 
         cfg.web_client.path = "/client".to_owned();
@@ -2728,7 +2794,7 @@ mod tests {
         )
         .await
         .expect("domain host should be accepted when it resolves to remote ip");
-        assert_eq!(out, "http://localhost:8080/");
+        assert_eq!(out, "http://127.0.0.1:8080/");
     }
 
     #[tokio::test(flavor = "current_thread")]

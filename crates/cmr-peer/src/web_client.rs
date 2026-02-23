@@ -161,7 +161,11 @@ pub(crate) async fn handle_client_request(
                     });
                     entries.reverse();
                     let total = entries.len();
-                    let entries = entries.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+                    let entries = entries
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .collect::<Vec<_>>();
                     response_api_ok(
                         StatusCode::OK,
                         ClientCachePayload {
@@ -211,7 +215,11 @@ pub(crate) async fn handle_client_request(
             });
             entries.reverse();
             let total = entries.len();
-            let entries = entries.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+            let entries = entries
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect::<Vec<_>>();
             response_api_ok(
                 StatusCode::OK,
                 ClientInboxPayload {
@@ -222,23 +230,15 @@ pub(crate) async fn handle_client_request(
                 },
             )
         }
-        (Method::POST, "/api/compose") => match parse_json_body::<ClientComposePayload>(req).await {
-            Ok(payload) => {
-                let body_text = match build_message_body(payload.body_text, payload.sources, payload.attachments) {
-                    Ok(body) => body,
-                    Err(err) => {
-                        return Ok(response_api_error(
-                            StatusCode::BAD_REQUEST,
-                            "invalid_input",
-                            &err,
-                            None,
-                        ));
-                    }
-                };
-                let destination = match payload.destination.as_deref().map(str::trim) {
-                    Some("") | None => None,
-                    Some(value) => match canonicalize_client_url(value) {
-                        Ok(normalized) => Some(normalized),
+        (Method::POST, "/api/compose") => {
+            match parse_json_body::<ClientComposePayload>(req).await {
+                Ok(payload) => {
+                    let body_text = match build_message_body(
+                        payload.body_text,
+                        payload.sources,
+                        payload.attachments,
+                    ) {
+                        Ok(body) => body,
                         Err(err) => {
                             return Ok(response_api_error(
                                 StatusCode::BAD_REQUEST,
@@ -247,59 +247,75 @@ pub(crate) async fn handle_client_request(
                                 None,
                             ));
                         }
-                    },
-                };
-                let extra_destinations = match payload.extra_destinations {
-                    Some(items) => {
-                        let mut normalized = Vec::new();
-                        for item in items {
-                            let trimmed = item.trim();
-                            if trimmed.is_empty() {
-                                continue;
+                    };
+                    let destination = match payload.destination.as_deref().map(str::trim) {
+                        Some("") | None => None,
+                        Some(value) => match canonicalize_client_url(value) {
+                            Ok(normalized) => Some(normalized),
+                            Err(err) => {
+                                return Ok(response_api_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_input",
+                                    &err,
+                                    None,
+                                ));
                             }
-                            match canonicalize_client_url(trimmed) {
-                                Ok(value) => normalized.push(value),
-                                Err(err) => {
-                                    return Ok(response_api_error(
-                                        StatusCode::BAD_REQUEST,
-                                        "invalid_input",
-                                        &format!("invalid extra destination `{trimmed}`: {err}"),
-                                        None,
-                                    ));
+                        },
+                    };
+                    let extra_destinations = match payload.extra_destinations {
+                        Some(items) => {
+                            let mut normalized = Vec::new();
+                            for item in items {
+                                let trimmed = item.trim();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+                                match canonicalize_client_url(trimmed) {
+                                    Ok(value) => normalized.push(value),
+                                    Err(err) => {
+                                        return Ok(response_api_error(
+                                            StatusCode::BAD_REQUEST,
+                                            "invalid_input",
+                                            &format!(
+                                                "invalid extra destination `{trimmed}`: {err}"
+                                            ),
+                                            None,
+                                        ));
+                                    }
                                 }
                             }
+                            normalized
                         }
-                        normalized
+                        None => Vec::new(),
+                    };
+                    let identity = payload
+                        .identity
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned);
+                    match state
+                        .compose_and_send(
+                            destination,
+                            extra_destinations,
+                            body_text,
+                            payload.sign,
+                            identity,
+                        )
+                        .await
+                    {
+                        Ok(result) => response_api_ok(StatusCode::OK, result),
+                        Err(err) => response_api_error(
+                            StatusCode::BAD_REQUEST,
+                            "runtime_error",
+                            &err.to_string(),
+                            None,
+                        ),
                     }
-                    None => Vec::new(),
-                };
-                let identity = payload
-                    .identity
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned);
-                match state
-                    .compose_and_send(
-                        destination,
-                        extra_destinations,
-                        body_text,
-                        payload.sign,
-                        identity,
-                    )
-                    .await
-                {
-                    Ok(result) => response_api_ok(StatusCode::OK, result),
-                    Err(err) => response_api_error(
-                        StatusCode::BAD_REQUEST,
-                        "runtime_error",
-                        &err.to_string(),
-                        None,
-                    ),
                 }
+                Err(resp) => resp,
             }
-            Err(resp) => resp,
-        },
+        }
         _ => response_api_error(StatusCode::NOT_FOUND, "not_found", "not found", None),
     };
 
@@ -550,8 +566,7 @@ mod tests {
     #[test]
     fn canonicalize_client_url_normalizes_host_and_strips_query() {
         let left = canonicalize_client_url("http://localhost:8081").expect("left");
-        let right =
-            canonicalize_client_url("HTTP://127.0.0.1:8081/?x=1#frag").expect("right");
+        let right = canonicalize_client_url("HTTP://127.0.0.1:8081/?x=1#frag").expect("right");
         assert_eq!(left, "http://127.0.0.1:8081/");
         assert_eq!(right, "http://127.0.0.1:8081/");
     }
