@@ -67,6 +67,7 @@ cmr-peer init-config --config cmr-peer.toml
 - set listener bind/path values in `[listen.http]`/`[listen.https]`/`[listen.udp]` (and optional `[listen.smtp]` for inbound `mailto:`).
 - keep `[compressor].command = "cmr-compressor"` unless you need a custom path.
 - dashboard defaults to disabled; if you enable it, you must set both `dashboard.auth_username` and `dashboard.auth_password`.
+- public web-client UI defaults to disabled; enable `[web_client]` to expose a client-only compose UI/API separate from operator dashboard auth.
 
 3. Run the peer:
 
@@ -106,7 +107,7 @@ bind = "127.0.0.1:4001"
 path = "/"
 ```
 
-2. (Optional but recommended) enable dashboard client UI:
+2. (Optional) enable operator dashboard UI:
 
 ```toml
 [dashboard]
@@ -121,16 +122,37 @@ Dashboard transport/auth rules:
 - HTTP dashboard access is allowed only from loopback/local addresses.
 - Dashboard requests are rejected unless both basic-auth fields are configured.
 
-3. Start peer:
+3. (Optional) enable public web client UI (no auth):
+
+```toml
+[web_client]
+enabled = true
+path = "/_cmr_client"
+require_https = true
+```
+
+Web client transport rules:
+- `require_https = true` allows HTTP only from loopback/local addresses and requires HTTPS for non-localhost access.
+- The web client only exposes client compose endpoints and cannot access operator runtime/config controls.
+
+4. Start peer:
 
 ```bash
 cmr-peer run --config cmr-peer.toml
 ```
 
-4. Post and view messages:
+5. Post and view messages:
 - Open `http://127.0.0.1:4001/_cmr` and use `Post To Message Pool`.
+- Open `http://127.0.0.1:4001/_cmr_client` for client-only compose with optional per-message identity override.
 - For first-hop delivery in ambient mode, set `[ambient].seed_peers` in config.
 - Local post acceptance, semantic matches, and outbound delivery are shown separately in compose results.
+
+Client GUI model (AGI2-aligned):
+- `Post + Search`: single primary box where posting adds a message and returns related messages; search lists matching pool entries.
+- `Results`: ranked related/matching messages with sender/timestamp and route-explanation drawer (`Why did I see this?`).
+- `Thread`: conversation-style chain view with route/provenance details and reply-by-posting workflow.
+- `Identity & Keys`: browser-local identity profiles and per-peer signing preferences (router key material remains pairwise and managed by router protocol flows).
+- `Inbox`: routed-back message feed with sender/body filters.
 
 ## Build From Source
 
@@ -184,21 +206,6 @@ cargo run -p cmr-peer -- init-config --config cmr-peer.toml
 cargo run -p cmr-peer -- run --config cmr-peer.toml
 cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime
 ```
-
-### Optional TUI
-
-Build with the `tui` feature and launch with no subcommand:
-
-```bash
-cargo run -p cmr-peer --features tui
-```
-
-The terminal dashboard provides high-level controls:
-
-- start/stop runtime
-- create/reload config template
-- execute local HTTP self-test
-- live event log
 
 ## Notes
 

@@ -42,6 +42,26 @@ max_frame_bytes = 8388608
 binary = "ssh"
 default_remote_command = "cmr-peer receive-stdin --config /etc/cmr-peer.toml --transport ssh"
 
-[[static_keys]]
-peer = "http://peer-a.example/cmr"
-hex_key = "666f6f626172313233"
+[dashboard]
+enabled = false
+path = "/_cmr"
+# Optional HTTP Basic credentials required for all dashboard/API requests.
+# auth_username = "operator"
+# auth_password = "change-me"
+
+[web_client]
+enabled = false
+path = "/_cmr_client"
+# Require HTTPS for non-localhost access to public client UI/API.
+require_https = true
+
+[ambient]
+# Optional first-hop peers used for blank-destination compose.
+seed_peers = []
+# Maximum ambient seed fanout per compose action.
+seed_fanout = 8
+
+# Optional static pairwise keys:
+# [[static_keys]]
+# peer = "http://peer-a.example/cmr"
+# hex_key = "666f6f626172313233"

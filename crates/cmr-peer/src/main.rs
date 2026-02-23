@@ -1,4 +1,4 @@
-//! CMR peer daemon and optional terminal dashboard.
+//! CMR peer daemon.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -12,8 +12,6 @@ use cmr_peer::app::{
 use cmr_peer::config::{
     ConfigError, HttpListenConfig, PeerConfig, UdpListenConfig, write_example_config,
 };
-#[cfg(feature = "tui")]
-use cmr_peer::tui::run_tui;
 
 /// CMR peer CLI.
 #[derive(Debug, Parser)]
@@ -88,13 +86,6 @@ enum Command {
         #[arg(long, default_value = "ssh")]
         transport: String,
     },
-    /// Open the high-level terminal dashboard (requires `--features tui`).
-    #[cfg(feature = "tui")]
-    Ui {
-        /// TOML config file path.
-        #[arg(long, default_value = "cmr-peer.toml")]
-        config: String,
-    },
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -159,26 +150,14 @@ async fn main() {
             }
             Err(err) => Err(err),
         },
-        #[cfg(feature = "tui")]
-        Command::Ui { config } => run_tui(config).await,
     };
 
     print_error_and_exit(result.err());
 }
 
 fn default_command() -> Command {
-    #[cfg(feature = "tui")]
-    {
-        Command::Ui {
-            config: "cmr-peer.toml".to_owned(),
-        }
-    }
-
-    #[cfg(not(feature = "tui"))]
-    {
-        Command::Run {
-            config: "cmr-peer.toml".to_owned(),
-        }
+    Command::Run {
+        config: "cmr-peer.toml".to_owned(),
     }
 }
 
@@ -309,55 +288,95 @@ fn print_startup_hints(cfg: &PeerConfig, config_path: &str, created_template: bo
     }
     eprintln!("using config: `{config_path}`");
     if !cfg.dashboard.enabled {
-        return;
+        if !cfg.web_client.enabled {
+            return;
+        }
     }
 
-    let dashboard_path = normalize_path_prefix(&cfg.dashboard.path);
-    if let Some(http) = &cfg.listen.http {
-        if let Ok(bind) = http.bind.parse::<SocketAddr>() {
+    if cfg.dashboard.enabled {
+        let dashboard_path = normalize_path_prefix(&cfg.dashboard.path);
+        if let Some(http) = &cfg.listen.http {
+            if let Ok(bind) = http.bind.parse::<SocketAddr>() {
+                let host = match bind.ip() {
+                    IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    ip => ip,
+                };
+                let url = match host {
+                    IpAddr::V4(ip) => format!("http://{ip}:{}{}", bind.port(), dashboard_path),
+                    IpAddr::V6(ip) => format!("http://[{ip}]:{}{}", bind.port(), dashboard_path),
+                };
+                eprintln!("dashboard: {url}");
+            }
+        } else if let Some(https) = &cfg.listen.https
+            && let Ok(bind) = https.bind.parse::<SocketAddr>()
+        {
             let host = match bind.ip() {
                 IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
                 IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
                 ip => ip,
             };
             let url = match host {
-                IpAddr::V4(ip) => format!("http://{ip}:{}{}", bind.port(), dashboard_path),
-                IpAddr::V6(ip) => format!("http://[{ip}]:{}{}", bind.port(), dashboard_path),
+                IpAddr::V4(ip) => format!("https://{ip}:{}{}", bind.port(), dashboard_path),
+                IpAddr::V6(ip) => format!("https://[{ip}]:{}{}", bind.port(), dashboard_path),
             };
             eprintln!("dashboard: {url}");
         }
-    } else if let Some(https) = &cfg.listen.https
-        && let Ok(bind) = https.bind.parse::<SocketAddr>()
-    {
-        let host = match bind.ip() {
-            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-            ip => ip,
-        };
-        let url = match host {
-            IpAddr::V4(ip) => format!("https://{ip}:{}{}", bind.port(), dashboard_path),
-            IpAddr::V6(ip) => format!("https://[{ip}]:{}{}", bind.port(), dashboard_path),
-        };
-        eprintln!("dashboard: {url}");
-    }
-    if cfg
-        .dashboard
-        .auth_username
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|v| !v.is_empty())
-        && cfg
+        if cfg
             .dashboard
-            .auth_password
+            .auth_username
             .as_deref()
             .map(str::trim)
             .is_some_and(|v| !v.is_empty())
-    {
-        eprintln!("dashboard auth enabled: use HTTP Basic authentication");
-    } else {
-        eprintln!(
-            "dashboard security warning: auth_username/auth_password are required; dashboard requests will be denied until configured"
-        );
+            && cfg
+                .dashboard
+                .auth_password
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|v| !v.is_empty())
+        {
+            eprintln!("dashboard auth enabled: use HTTP Basic authentication");
+        } else {
+            eprintln!(
+                "dashboard security warning: auth_username/auth_password are required; dashboard requests will be denied until configured"
+            );
+        }
+    }
+
+    if cfg.web_client.enabled {
+        let client_path = normalize_path_prefix(&cfg.web_client.path);
+        if let Some(http) = &cfg.listen.http {
+            if let Ok(bind) = http.bind.parse::<SocketAddr>() {
+                let host = match bind.ip() {
+                    IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    ip => ip,
+                };
+                let url = match host {
+                    IpAddr::V4(ip) => format!("http://{ip}:{}{}", bind.port(), client_path),
+                    IpAddr::V6(ip) => format!("http://[{ip}]:{}{}", bind.port(), client_path),
+                };
+                eprintln!("client ui: {url}");
+            }
+        } else if let Some(https) = &cfg.listen.https
+            && let Ok(bind) = https.bind.parse::<SocketAddr>()
+        {
+            let host = match bind.ip() {
+                IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                ip => ip,
+            };
+            let url = match host {
+                IpAddr::V4(ip) => format!("https://{ip}:{}{}", bind.port(), client_path),
+                IpAddr::V6(ip) => format!("https://[{ip}]:{}{}", bind.port(), client_path),
+            };
+            eprintln!("client ui: {url}");
+        }
+        if cfg.web_client.require_https {
+            eprintln!("client ui security: HTTPS required for non-loopback access");
+        } else {
+            eprintln!("client ui security warning: non-HTTPS public access is allowed");
+        }
     }
 }
 

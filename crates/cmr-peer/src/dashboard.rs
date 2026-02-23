@@ -608,6 +608,7 @@ pub(crate) async fn handle_dashboard_request(
                         extra_destinations,
                         payload.body_text,
                         payload.sign,
+                        None,
                     )
                     .await
                 {

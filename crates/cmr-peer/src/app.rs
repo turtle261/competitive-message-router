@@ -41,11 +41,12 @@ use url::form_urlencoded;
 use crate::compressor_client::{
     CompressorClient, CompressorClientConfig, CompressorClientInitError,
 };
-use crate::config::{HttpsListenConfig, PeerConfig, SmtpListenConfig};
+use crate::config::{HttpsListenConfig, PeerConfig, SmtpListenConfig, WebClientConfig};
 use crate::dashboard;
 use crate::transport::{
     HandshakeStore, TransportError, TransportManager, extract_cmr_payload, extract_udp_payload,
 };
+use crate::web_client;
 
 const RECENT_EVENTS_CAP: usize = 500;
 const INBOX_MESSAGES_CAP: usize = 1_000;
@@ -369,7 +370,7 @@ impl AppState {
                 "transport plane is disabled (enable it before sending)".to_owned(),
             ));
         }
-        let message = self.build_ui_message(body)?;
+        let message = self.build_ui_message(body, None)?;
         let payload = self.render_ui_payload_for_destination(&message, destination, sign)?;
         match tokio::time::timeout(
             OUTBOUND_SEND_TIMEOUT,
@@ -528,13 +529,14 @@ impl AppState {
         extra_destinations: Vec<String>,
         body_text: String,
         sign: bool,
+        identity: Option<String>,
     ) -> Result<ComposeResult, AppError> {
         let requested_destination = destination
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         let ambient = requested_destination.is_none();
 
-        let message = self.build_ui_message(body_text.into_bytes())?;
+        let message = self.build_ui_message(body_text.into_bytes(), identity.as_deref())?;
         let payload = message.to_bytes();
         let local_result = if self.ingest_enabled() {
             Some(self.inject_local_message(payload.clone()).await?)
@@ -960,16 +962,21 @@ impl AppState {
         }))
     }
 
-    fn build_ui_message(&self, body: Vec<u8>) -> Result<CmrMessage, AppError> {
+    fn build_ui_message(&self, body: Vec<u8>, identity: Option<&str>) -> Result<CmrMessage, AppError> {
         let guard = self
             .router
             .lock()
             .map_err(|_| AppError::Runtime("router mutex poisoned".to_owned()))?;
+        let sender_address = if let Some(identity) = identity {
+            validate_client_identity(identity)?
+        } else {
+            guard.local_address().to_owned()
+        };
         Ok(CmrMessage {
             signature: Signature::Unsigned,
             header: vec![MessageId {
                 timestamp: CmrTimestamp::now_utc(),
-                address: guard.local_address().to_owned(),
+                address: sender_address,
             }],
             body,
         })
@@ -1224,6 +1231,7 @@ pub async fn start_peer_with_config_path(
     config: PeerConfig,
     config_path: Option<String>,
 ) -> Result<PeerRuntime, AppError> {
+    validate_web_ui_paths(&config)?;
     let state = build_app_state(&config, config_path).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1232,12 +1240,14 @@ pub async fn start_peer_with_config_path(
         let listener = TcpListener::bind(&http_cfg.bind).await?;
         let state = state.clone();
         let dashboard_cfg = config.dashboard.clone();
+        let web_client_cfg = config.web_client.clone();
         let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             if let Err(err) = run_http_listener(
                 listener,
                 http_cfg.path,
                 dashboard_cfg,
+                web_client_cfg,
                 state,
                 false,
                 &mut local_shutdown,
@@ -1252,6 +1262,7 @@ pub async fn start_peer_with_config_path(
         let (listener, acceptor) = bind_https_listener(&https_cfg).await?;
         let state = state.clone();
         let dashboard_cfg = config.dashboard.clone();
+        let web_client_cfg = config.web_client.clone();
         let mut local_shutdown = shutdown_rx.clone();
         handles.push(tokio::spawn(async move {
             if let Err(err) = run_https_listener(
@@ -1259,6 +1270,7 @@ pub async fn start_peer_with_config_path(
                 acceptor,
                 https_cfg.path,
                 dashboard_cfg,
+                web_client_cfg,
                 state,
                 &mut local_shutdown,
             )
@@ -1472,6 +1484,7 @@ async fn run_http_listener(
     listener: TcpListener,
     path: String,
     dashboard_cfg: crate::config::DashboardConfig,
+    web_client_cfg: WebClientConfig,
     state: AppState,
     is_https: bool,
     shutdown: &mut watch::Receiver<bool>,
@@ -1488,6 +1501,7 @@ async fn run_http_listener(
                 let state = state.clone();
                 let path = path.clone();
                 let dashboard_cfg = dashboard_cfg.clone();
+                let web_client_cfg = web_client_cfg.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let service = service_fn(move |req| {
@@ -1495,6 +1509,7 @@ async fn run_http_listener(
                             req,
                             path.clone(),
                             dashboard_cfg.clone(),
+                            web_client_cfg.clone(),
                             state.clone(),
                             is_https,
                             Some(remote_addr.ip()),
@@ -1518,6 +1533,7 @@ async fn run_https_listener(
     acceptor: TlsAcceptor,
     path: String,
     dashboard_cfg: crate::config::DashboardConfig,
+    web_client_cfg: WebClientConfig,
     state: AppState,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), AppError> {
@@ -1534,6 +1550,7 @@ async fn run_https_listener(
                 let acceptor = acceptor.clone();
                 let path = path.clone();
                 let dashboard_cfg = dashboard_cfg.clone();
+                let web_client_cfg = web_client_cfg.clone();
                 tokio::spawn(async move {
                     let tls_stream = match acceptor.accept(stream).await {
                         Ok(s) => s,
@@ -1548,6 +1565,7 @@ async fn run_https_listener(
                             req,
                             path.clone(),
                             dashboard_cfg.clone(),
+                            web_client_cfg.clone(),
                             state.clone(),
                             true,
                             Some(remote_addr.ip()),
@@ -2061,6 +2079,7 @@ async fn handle_http_request(
     req: Request<Incoming>,
     ingest_path: String,
     dashboard_cfg: crate::config::DashboardConfig,
+    web_client_cfg: WebClientConfig,
     state: AppState,
     is_https: bool,
     remote_ip: Option<IpAddr>,
@@ -2075,12 +2094,26 @@ async fn handle_http_request(
     let path = uri.path().to_owned();
 
     if dashboard_cfg.enabled {
-        let base = normalize_dashboard_base_path(&dashboard_cfg.path);
+        let base = normalize_web_base_path(&dashboard_cfg.path);
         if path == base || path.starts_with(&format!("{base}/")) {
             return dashboard::handle_dashboard_request(
                 req,
                 state,
                 dashboard_cfg,
+                is_https,
+                remote_ip,
+            )
+            .await;
+        }
+    }
+
+    if web_client_cfg.enabled {
+        let base = normalize_web_base_path(&web_client_cfg.path);
+        if path == base || path.starts_with(&format!("{base}/")) {
+            return web_client::handle_client_request(
+                req,
+                state,
+                web_client_cfg,
                 is_https,
                 remote_ip,
             )
@@ -2173,7 +2206,7 @@ async fn handle_http_request(
     Ok(response(StatusCode::NOT_FOUND, Bytes::new()))
 }
 
-fn normalize_dashboard_base_path(path: &str) -> String {
+fn normalize_web_base_path(path: &str) -> String {
     if path.is_empty() || path == "/" {
         "/".to_owned()
     } else if path.starts_with('/') {
@@ -2340,6 +2373,41 @@ fn parse_security_level(value: &str) -> Result<SecurityLevel, AppError> {
             "security_level must be one of: strict|balanced|trusted".to_owned(),
         )),
     }
+}
+
+fn validate_client_identity(identity: &str) -> Result<String, AppError> {
+    let trimmed = identity.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidConfig(
+            "client identity cannot be empty".to_owned(),
+        ));
+    }
+    if trimmed.len() > 2048 {
+        return Err(AppError::InvalidConfig(
+            "client identity is too long (max 2048 chars)".to_owned(),
+        ));
+    }
+    if trimmed.contains('\r') || trimmed.contains('\n') {
+        return Err(AppError::InvalidConfig(
+            "client identity cannot contain CR or LF".to_owned(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn validate_web_ui_paths(config: &PeerConfig) -> Result<(), AppError> {
+    if !(config.dashboard.enabled && config.web_client.enabled) {
+        return Ok(());
+    }
+    let dashboard_path = normalize_web_base_path(&config.dashboard.path);
+    let client_path = normalize_web_base_path(&config.web_client.path);
+    if dashboard_path == client_path {
+        return Err(AppError::InvalidConfig(
+            "dashboard.path and web_client.path must be different when both UIs are enabled"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn simple_line_diff(old_text: &str, new_text: &str) -> String {
@@ -2565,9 +2633,10 @@ mod tests {
 
     use super::{
         ComposeDeliveryResult, compose_primary_delivery_for_ambient,
-        extract_cmr_payload_from_email, loopback_http_target, normalize_dashboard_base_path,
-        normalize_ingest_path, read_smtp_data, resolve_ambient_seed_destinations,
-        setup_first_send_ready, validate_handshake_callback_request,
+        extract_cmr_payload_from_email, loopback_http_target, normalize_ingest_path,
+        normalize_web_base_path, read_smtp_data, resolve_ambient_seed_destinations,
+        setup_first_send_ready, validate_client_identity, validate_handshake_callback_request,
+        validate_web_ui_paths,
     };
 
     #[test]
@@ -2579,9 +2648,30 @@ mod tests {
 
     #[test]
     fn normalize_dashboard_path_treats_trailing_slash_consistently() {
-        assert_eq!(normalize_dashboard_base_path("/_cmr"), "/_cmr");
-        assert_eq!(normalize_dashboard_base_path("/_cmr/"), "/_cmr");
-        assert_eq!(normalize_dashboard_base_path("_cmr/"), "/_cmr");
+        assert_eq!(normalize_web_base_path("/_cmr"), "/_cmr");
+        assert_eq!(normalize_web_base_path("/_cmr/"), "/_cmr");
+        assert_eq!(normalize_web_base_path("_cmr/"), "/_cmr");
+    }
+
+    #[test]
+    fn client_identity_validation_rejects_control_chars_and_empty_values() {
+        assert!(validate_client_identity(" ").is_err());
+        assert!(validate_client_identity("alice\r\nexample").is_err());
+        assert!(validate_client_identity("alice@example").is_ok());
+    }
+
+    #[test]
+    fn web_ui_paths_must_not_overlap_when_enabled() {
+        let mut cfg = PeerConfig::from_toml_str(crate::config::EXAMPLE_CONFIG_TOML)
+            .expect("example config");
+        cfg.dashboard.enabled = true;
+        cfg.web_client.enabled = true;
+        cfg.dashboard.path = "/ui".to_owned();
+        cfg.web_client.path = "/ui/".to_owned();
+        assert!(validate_web_ui_paths(&cfg).is_err());
+
+        cfg.web_client.path = "/client".to_owned();
+        assert!(validate_web_ui_paths(&cfg).is_ok());
     }
 
     #[test]
