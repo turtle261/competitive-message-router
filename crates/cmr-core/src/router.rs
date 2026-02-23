@@ -257,7 +257,7 @@ pub struct PeerSnapshot {
 impl Default for PeerMetrics {
     fn default() -> Self {
         Self {
-            reputation: 0.0,
+            reputation: 50.0,
             inbound_messages: 0,
             inbound_bytes: 0,
             outbound_messages: 0,

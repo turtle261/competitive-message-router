@@ -188,7 +188,7 @@ pub(crate) async fn handle_dashboard_request(
 
     let query = parse_query(req.uri().query().unwrap_or_default());
     if !dashboard_auth_is_configured(&cfg) {
-        return Ok(response_api_error(
+        return Ok(response_basic_auth_required(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "dashboard authentication is required and must be configured",
@@ -196,7 +196,7 @@ pub(crate) async fn handle_dashboard_request(
         ));
     }
     if !is_authorized(&req, &cfg, &query) {
-        return Ok(response_api_error(
+        return Ok(response_basic_auth_required(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "missing or invalid basic authorization",
@@ -1311,6 +1311,20 @@ fn response_api_error(
     )
 }
 
+fn response_basic_auth_required(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    details: Option<serde_json::Value>,
+) -> Response<PeerBody> {
+    let mut response = response_api_error(status, code, message, details);
+    response.headers_mut().insert(
+        http::header::WWW_AUTHENTICATE,
+        http::HeaderValue::from_static("Basic realm=\"CMR Dashboard\", charset=\"UTF-8\""),
+    );
+    response
+}
+
 fn response_api<T: Serialize>(status: StatusCode, value: ApiEnvelope<T>) -> Response<PeerBody> {
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| {
         b"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"serialize_error\",\"message\":\"failed to serialize response\",\"details\":null}}".to_vec()
@@ -1327,7 +1341,7 @@ mod tests {
     use super::{
         canonicalize_operator_url, dashboard_auth_is_configured, dashboard_transport_allowed,
         format_probe_failure, normalize_base_path, parse_basic_authorization_header,
-        response_api_error, transport_error_hint,
+        response_api_error, response_basic_auth_required, transport_error_hint,
     };
     use http::StatusCode;
     use http_body_util::BodyExt;
@@ -1443,6 +1457,24 @@ mod tests {
         assert_eq!(
             error.get("message").and_then(Value::as_str),
             Some("bad payload")
+        );
+    }
+
+    #[test]
+    fn basic_auth_response_sets_www_authenticate_header() {
+        let response = response_basic_auth_required(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid basic authorization",
+            None,
+        );
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic realm=\"CMR Dashboard\", charset=\"UTF-8\"")
         );
     }
 }
