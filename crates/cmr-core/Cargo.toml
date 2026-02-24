@@ -28,4 +28,8 @@ time = "0.3.44"
 url = "2.5.7"
 
 [dev-dependencies]
+hex = "0.4.3"
+hkdf = "0.12.4"
+hmac = "0.12.1"
 proptest = "1.9.0"
+sha2 = "0.10.9"
