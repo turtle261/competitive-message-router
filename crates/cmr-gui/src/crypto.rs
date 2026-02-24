@@ -33,7 +33,7 @@ pub fn parse_key_hex(s: &str) -> Result<Vec<u8>, String> {
     if s.is_empty() {
         return Err("Key must not be empty.".to_owned());
     }
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("Key hex string must have an even number of characters.".to_owned());
     }
     if !s.bytes().all(|b| b.is_ascii_hexdigit()) {

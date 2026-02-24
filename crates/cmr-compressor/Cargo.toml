@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Isolated compressor worker for CMR distance and intrinsic-dependence computations."
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 documentation = "https://docs.rs/cmr-compressor"
 keywords = ["cmr", "compression", "ipc", "routing"]
 categories = ["compression", "network-programming", "kolmogorov-complexity", "information-theory"]

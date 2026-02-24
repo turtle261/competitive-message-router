@@ -44,6 +44,9 @@ pub struct PeerConfig {
     /// Ambient compose seed behavior.
     #[serde(default)]
     pub ambient: AmbientConfig,
+    /// Message storage configuration.
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 impl PeerConfig {
@@ -95,6 +98,30 @@ impl Default for AmbientConfig {
         Self {
             seed_peers: Vec::new(),
             seed_fanout: default_ambient_seed_fanout(),
+        }
+    }
+}
+
+/// Message storage configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StorageConfig {
+    /// Enable message persistence.
+    #[serde(default = "default_storage_enabled")]
+    pub enabled: bool,
+    /// Absolute path to the zpaq archive file.
+    #[serde(default = "default_storage_path")]
+    pub path: String,
+    /// Maximum bytes to load into memory when restoring.
+    #[serde(default = "default_storage_restore_limit")]
+    pub max_restore_bytes: u64,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_storage_enabled(),
+            path: default_storage_path(),
+            max_restore_bytes: default_storage_restore_limit(),
         }
     }
 }
@@ -331,6 +358,18 @@ fn default_dashboard_path() -> String {
 
 fn default_ambient_seed_fanout() -> usize {
     8
+}
+
+fn default_storage_path() -> String {
+    String::new()
+}
+
+fn default_storage_enabled() -> bool {
+    false
+}
+
+fn default_storage_restore_limit() -> u64 {
+    256 * 1024 * 1024
 }
 
 #[cfg(test)]

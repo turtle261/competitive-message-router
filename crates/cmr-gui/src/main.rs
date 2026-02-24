@@ -10,7 +10,6 @@
 mod app;
 mod config;
 mod crypto;
-mod distance;
 mod wizard;
 
 use config::{Config, default_config_path};
@@ -53,7 +52,7 @@ fn build_ui(app: &Application) {
     if Config::exists(&config_path) {
         match Config::load(&config_path) {
             Ok(config) => {
-                app::show_main_app(&window, config);
+                app::show_main_app(&window, &config);
             }
             Err(e) => {
                 // Corrupted or unreadable config — show wizard to recreate it.
@@ -67,7 +66,7 @@ fn build_ui(app: &Application) {
                     if let Err(e) = config.save(&path) {
                         eprintln!("cmr-gui: failed to save config: {e}");
                     }
-                    app::show_main_app(&window_for_done, config);
+                    app::show_main_app(&window_for_done, &config);
                 });
             }
         }
@@ -81,7 +80,7 @@ fn build_ui(app: &Application) {
             if let Err(e) = config.save(&path) {
                 eprintln!("cmr-gui: failed to save config: {e}");
             }
-            app::show_main_app(&window_for_done, config);
+            app::show_main_app(&window_for_done, &config);
         });
     }
 

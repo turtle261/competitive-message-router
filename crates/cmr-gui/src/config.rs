@@ -225,7 +225,9 @@ impl Config {
     }
 
     fn normalize_identities(&mut self) -> Result<(), ConfigError> {
-        if self.identities.is_empty() && let Some(legacy) = self.identity.clone() {
+        if self.identities.is_empty()
+            && let Some(legacy) = self.identity.clone()
+        {
             self.identities.push(IdentityProfile {
                 name: "default".to_owned(),
                 identity: legacy,
@@ -239,7 +241,7 @@ impl Config {
         for profile in &mut self.identities {
             let trimmed = profile.name.trim();
             if trimmed.is_empty() {
-                profile.name = "identity".to_owned();
+                "identity".clone_into(&mut profile.name);
             } else {
                 profile.name = trimmed.to_owned();
             }

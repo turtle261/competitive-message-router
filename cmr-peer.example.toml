@@ -61,6 +61,15 @@ seed_peers = []
 # Maximum ambient seed fanout per compose action.
 seed_fanout = 8
 
+[storage]
+# Enable message persistence (default false).
+enabled = false
+# Absolute path to the zpaq archive for message persistence.
+# Must be set to an absolute path; empty string disables startup until configured.
+path = ""
+# Maximum bytes to load into memory when restoring.
+max_restore_bytes = 268435456
+
 # Optional static pairwise keys:
 # [[static_keys]]
 # peer = "http://peer-a.example/cmr"

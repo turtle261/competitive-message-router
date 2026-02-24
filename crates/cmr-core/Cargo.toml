@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Core protocol/parser/router primitives for Competitive Message Routing (CMR)."
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 documentation = "https://docs.rs/cmr-core"
 keywords = ["cmr", "routing", "protocol", "networking"]
 categories = ["network-programming", "parser-implementations", "kolmogorov-complexity", "information-theory"]

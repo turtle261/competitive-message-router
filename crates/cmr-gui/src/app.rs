@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cmr_client::{ClientTransportConfig, CmrClient, ReceivedMessage};
-use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, ParseContext, Signature, parse_message};
+use cmr_core::protocol::{
+    CmrMessage, CmrTimestamp, MessageId, ParseContext, Signature, parse_message,
+};
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
 use crate::config::{Config, IdentityConfig, IdentityProfile};
-use crate::distance::{format_distance, nearest_neighbor_distance};
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ use crate::distance::{format_distance, nearest_neighbor_distance};
 /// Builds both tabs, starts the HTTP inbox server if the identity is `Local`,
 /// and wires up all async interactions with the Tokio runtime that was entered
 /// before the GTK main loop started.
-pub fn show_main_app(window: &gtk4::ApplicationWindow, config: Config) {
+pub fn show_main_app(window: &gtk4::ApplicationWindow, config: &Config) {
     let handle = tokio::runtime::Handle::current();
 
     let identity_profiles = match config.identity_profiles() {
@@ -67,12 +68,10 @@ pub fn show_main_app(window: &gtk4::ApplicationWindow, config: Config) {
     };
 
     // Register the pairwise key for the router if one is configured.
-    if let Some(key_bytes) = config.key.bytes() {
-        if let Err(e) =
-            client.set_shared_key_for_destination(config.router.url.clone(), key_bytes)
-        {
-            eprintln!("cmr-gui: could not register signing key: {e}");
-        }
+    if let Some(key_bytes) = config.key.bytes()
+        && let Err(e) = client.set_shared_key_for_destination(config.router.url.clone(), key_bytes)
+    {
+        eprintln!("cmr-gui: could not register signing key: {e}");
     }
 
     let client = Arc::new(client);
@@ -88,10 +87,7 @@ pub fn show_main_app(window: &gtk4::ApplicationWindow, config: Config) {
     outer.append(&header);
 
     // ── Notebook ──────────────────────────────────────────────────────────
-    let notebook = gtk::Notebook::builder()
-        .vexpand(true)
-        .hexpand(true)
-        .build();
+    let notebook = gtk::Notebook::builder().vexpand(true).hexpand(true).build();
 
     let compose_tab = build_compose_tab(
         Arc::clone(&client),
@@ -109,19 +105,23 @@ pub fn show_main_app(window: &gtk4::ApplicationWindow, config: Config) {
             advertised_address: _,
         } = &profile.identity
         {
-            Some((profile.name.clone(), bind.clone(), path.clone(), profile.identity.address()))
+            Some((
+                profile.name.clone(),
+                bind.clone(),
+                path.clone(),
+                profile.identity.address(),
+            ))
         } else {
             None
         }
     });
 
     if let Some((name, bind, path, local_address)) = local_profile {
-            let inbox_tab =
-                build_local_inbox_tab(bind, path, local_address, name, &handle);
-            notebook.append_page(&inbox_tab, Some(&gtk::Label::new(Some("Inbox"))));
+        let inbox_tab = build_local_inbox_tab(&bind, &path, &local_address, &name, &handle);
+        notebook.append_page(&inbox_tab, Some(&gtk::Label::new(Some("Inbox"))));
     } else {
-            let inbox_tab = build_email_inbox_tab("no local inbox identity configured");
-            notebook.append_page(&inbox_tab, Some(&gtk::Label::new(Some("Inbox"))));
+        let inbox_tab = build_email_inbox_tab("no local inbox identity configured");
+        notebook.append_page(&inbox_tab, Some(&gtk::Label::new(Some("Inbox"))));
     }
 
     outer.append(&notebook);
@@ -144,7 +144,7 @@ fn build_header(identity: &str) -> gtk::Box {
     title.add_css_class("title-4");
 
     let id_label = gtk::Label::builder()
-        .label(&format!("Identity: {identity}"))
+        .label(format!("Identity: {identity}"))
         .hexpand(true)
         .halign(gtk::Align::End)
         .selectable(true)
@@ -158,6 +158,7 @@ fn build_header(identity: &str) -> gtk::Box {
 
 // ── Compose tab ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn build_compose_tab(
     client: Arc<CmrClient>,
     router_url: String,
@@ -208,8 +209,9 @@ fn build_compose_tab(
     identity_row.append(&identity_combo);
 
     let custom_identity = gtk::Entry::new();
-    custom_identity
-        .set_placeholder_text(Some("Optional override, e.g. http://public-client.example:8080/"));
+    custom_identity.set_placeholder_text(Some(
+        "Optional override, e.g. http://public-client.example:8080/",
+    ));
     identity_row.append(&custom_identity);
     outer.append(&identity_row);
 
@@ -228,9 +230,7 @@ fn build_compose_tab(
         .build();
     outer.append(&body_scroll);
 
-    let status_label = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .build();
+    let status_label = gtk::Label::builder().halign(gtk::Align::Start).build();
     status_label.set_visible(false);
     outer.append(&status_label);
 
@@ -339,16 +339,18 @@ fn build_compose_tab(
             let body_bytes = body.into_bytes();
             let tx2 = tx.clone();
             tokio::spawn(async move {
-                let result = match build_message_for_sender(&sender2, &body_bytes)
-                    .and_then(|message| {
+                let result =
+                    match build_message_for_sender(&sender2, &body_bytes).and_then(|message| {
                         client_c2
                             .render_for_destination(&url, message, sign)
                             .map_err(|e| e.to_string())
-                    })
-                {
-                    Ok(wire) => client_c2.send_wire(&url, &wire).await.map_err(|e| e.to_string()),
-                    Err(err) => Err(err),
-                };
+                    }) {
+                        Ok(wire) => client_c2
+                            .send_wire(&url, &wire)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(err) => Err(err),
+                    };
                 let _ = tx2.send(result);
             });
         });
@@ -408,7 +410,6 @@ fn build_compose_tab(
     {
         let paste_view_c = paste_view.clone();
         let output_view_c = output_view.clone();
-        let body_view_c = body_view.clone();
         decode_btn.connect_clicked(move |_| {
             let raw_text = text_view_text(&paste_view_c);
             let raw_bytes = raw_text.as_bytes();
@@ -454,26 +455,22 @@ fn build_compose_tab(
                     let reencoded = msg.to_bytes();
                     let roundtrip_ok = reencoded.len() == raw_bytes.len();
 
-                    let composed_body = text_view_text(&body_view_c);
-                    let dist = crate::distance::normalized_distance(
-                        &msg.body,
-                        composed_body.as_bytes(),
-                    );
-
                     let decoded_text = format!(
                         "=== CMR Message ===\n\
                          Signature:  {sig_line}\n\
                          Header ({} entries):\n{}\n\
                          Body ({} bytes):\n{}\n\
                          ---\n\
-                         Round-trip re-encode: {}\n\
-                         Info-distance vs. compose body: {}\n",
+                         Round-trip re-encode: {}\n",
                         msg.header.len(),
                         hops.join("\n"),
                         msg.body.len(),
                         body_display,
-                        if roundtrip_ok { "OK ✓" } else { "size mismatch !" },
-                        format_distance(dist),
+                        if roundtrip_ok {
+                            "OK ✓"
+                        } else {
+                            "size mismatch !"
+                        },
                     );
                     output_view_c.buffer().set_text(&decoded_text);
                 }
@@ -510,9 +507,7 @@ fn build_email_inbox_tab(email: &str) -> gtk::Box {
         .valign(gtk::Align::Center)
         .build();
 
-    let icon_label = gtk::Label::builder()
-        .label("[ Email Identity ]")
-        .build();
+    let icon_label = gtk::Label::builder().label("[ Email Identity ]").build();
     icon_label.add_css_class("title-2");
     outer.append(&icon_label);
 
@@ -544,10 +539,10 @@ fn build_email_inbox_tab(email: &str) -> gtk::Box {
 // ── Inbox tab — local HTTP inbox ──────────────────────────────────────────────
 
 fn build_local_inbox_tab(
-    bind: String,
-    path: String,
-    identity: String,
-    name: String,
+    bind: &str,
+    path: &str,
+    identity: &str,
+    name: &str,
     handle: &tokio::runtime::Handle,
 ) -> gtk::Box {
     let outer = gtk::Box::builder()
@@ -559,13 +554,9 @@ fn build_local_inbox_tab(
         .margin_end(12)
         .build();
 
-    let status_label = gtk::Label::builder()
-        .halign(gtk::Align::Start)
-        .build();
+    let status_label = gtk::Label::builder().halign(gtk::Align::Start).build();
 
-    let bind_result = handle.block_on(async {
-        cmr_client::HttpInbox::bind(&bind, &path).await
-    });
+    let bind_result = handle.block_on(async { cmr_client::HttpInbox::bind(bind, path).await });
 
     match bind_result {
         Err(e) => {
@@ -580,8 +571,8 @@ fn build_local_inbox_tab(
             status_label.set_markup(&format!(
                 "Listening on <tt>{}</tt> (profile: {})\nAdvertised as <tt>{}</tt>",
                 glib::markup_escape_text(&inbox_identity),
-                glib::markup_escape_text(&name),
-                glib::markup_escape_text(&identity)
+                glib::markup_escape_text(name),
+                glib::markup_escape_text(identity)
             ));
             outer.append(&status_label);
 
@@ -613,60 +604,45 @@ fn build_local_inbox_tab(
             outer.append(&list_scroll);
 
             // Shared state.
-            let corpus: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
             let message_count: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
 
             // Clear button.
             {
                 let list_box_c = list_box.clone();
                 let count_label_c = count_label.clone();
-                let corpus_c = corpus.clone();
                 let message_count_c = message_count.clone();
                 clear_btn.connect_clicked(move |_| {
                     while let Some(child) = list_box_c.first_child() {
                         list_box_c.remove(&child);
                     }
-                    corpus_c.borrow_mut().clear();
                     *message_count_c.borrow_mut() = 0;
                     count_label_c.set_text("0 messages");
                 });
             }
 
             // Bridge: tokio → GTK via std::sync::mpsc + glib::timeout_add_local.
-            let (inbox_tx, inbox_rx) =
-                std::sync::mpsc::channel::<ReceivedMessage>();
+            let (inbox_tx, inbox_rx) = std::sync::mpsc::channel::<ReceivedMessage>();
             let inbox_rx = Rc::new(RefCell::new(inbox_rx));
 
             // Tokio task forwards HttpInbox messages into the sync channel.
-            let _ = handle.spawn(async move {
+            drop(handle.spawn(async move {
                 while let Some(msg) = inbox.recv().await {
                     if inbox_tx.send(msg).is_err() {
                         break;
                     }
                 }
-            });
+            }));
 
             // GTK side polls every 50 ms.
             glib::timeout_add_local(Duration::from_millis(50), move || {
                 while let Ok(msg) = inbox_rx.borrow().try_recv() {
-                    let borrowed_corpus = corpus.borrow();
-                    let existing_bodies: Vec<&[u8]> =
-                        borrowed_corpus.iter().map(Vec::as_slice).collect();
-                    let dist =
-                        nearest_neighbor_distance(&msg.message.body, &existing_bodies);
-                    drop(borrowed_corpus);
-                    corpus.borrow_mut().push(msg.message.body.clone());
-
-                    let row = build_inbox_row(&msg, dist);
+                    let row = build_inbox_row(&msg);
                     list_box.append(&row);
 
                     let mut count = message_count.borrow_mut();
                     *count += 1;
                     let n = *count;
-                    count_label.set_text(&format!(
-                        "{n} message{}",
-                        if n == 1 { "" } else { "s" }
-                    ));
+                    count_label.set_text(&format!("{n} message{}", if n == 1 { "" } else { "s" }));
                 }
                 glib::ControlFlow::Continue
             });
@@ -678,7 +654,7 @@ fn build_local_inbox_tab(
 
 // ── Inbox row builder ─────────────────────────────────────────────────────────
 
-fn build_inbox_row(msg: &ReceivedMessage, distance: f64) -> gtk::ListBoxRow {
+fn build_inbox_row(msg: &ReceivedMessage) -> gtk::ListBoxRow {
     let vbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
@@ -710,30 +686,20 @@ fn build_inbox_row(msg: &ReceivedMessage, distance: f64) -> gtk::ListBoxRow {
     ));
     vbox.append(&meta_label);
 
-    if msg.message.header.len() > 1 {
-        if let Some(origin) = msg.message.origin_id() {
-            let origin_label = gtk::Label::builder()
-                .use_markup(true)
-                .halign(gtk::Align::Start)
-                .build();
-            origin_label.set_markup(&format!(
-                "<small><b>Origin:</b> {} {}</small>",
-                glib::markup_escape_text(&origin.timestamp.to_string()),
-                glib::markup_escape_text(&origin.address)
-            ));
-            vbox.append(&origin_label);
-        }
+    if msg.message.header.len() > 1
+        && let Some(origin) = msg.message.origin_id()
+    {
+        let origin_label = gtk::Label::builder()
+            .use_markup(true)
+            .halign(gtk::Align::Start)
+            .build();
+        origin_label.set_markup(&format!(
+            "<small><b>Origin:</b> {} {}</small>",
+            glib::markup_escape_text(&origin.timestamp.to_string()),
+            glib::markup_escape_text(&origin.address)
+        ));
+        vbox.append(&origin_label);
     }
-
-    let dist_label = gtk::Label::builder()
-        .use_markup(true)
-        .halign(gtk::Align::Start)
-        .build();
-    dist_label.set_markup(&format!(
-        "<small><b>Info-Distance (NCD):</b> {}</small>",
-        format_distance(distance)
-    ));
-    vbox.append(&dist_label);
 
     let body_text = String::from_utf8_lossy(&msg.message.body);
     let preview: String = if body_text.chars().count() > 240 {

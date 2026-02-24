@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "High-level CMR client library for composing, sending, and receiving CMR messages."
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 documentation = "https://docs.rs/cmr-client"
 keywords = ["cmr", "client", "routing", "protocol"]
 categories = ["network-programming", "api-bindings"]

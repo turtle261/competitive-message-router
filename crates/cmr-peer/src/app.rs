@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use bytes::Bytes;
 use cmr_core::policy::RoutingPolicy;
-#[cfg(any(feature = "dashboard", test))]
+#[cfg(feature = "dashboard")]
 use cmr_core::policy::SecurityLevel;
 use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, TransportKind};
 #[cfg(feature = "dashboard")]
@@ -60,6 +60,7 @@ use crate::compressor_client::{
 use crate::config::{HttpsListenConfig, PeerConfig, SmtpListenConfig};
 #[cfg(feature = "dashboard")]
 use crate::features::dashboard;
+use crate::storage::StorageManager;
 use crate::transport::{
     HandshakeStore, TransportError, TransportManager, extract_cmr_payload, extract_udp_payload,
 };
@@ -251,6 +252,7 @@ pub struct SetupStatus {
 pub(crate) struct AppState {
     router: Arc<Mutex<Router<CompressorClient>>>,
     transport: Arc<TransportManager>,
+    storage: Option<Arc<StorageManager>>,
     handshake_store: Arc<HandshakeStore>,
     ingest_enabled: Arc<AtomicBool>,
     transport_enabled: Arc<AtomicBool>,
@@ -611,6 +613,13 @@ impl AppState {
                 router.cache_local_client_message(&payload, CmrTimestamp::now_utc())
             })?
             .map_err(|err| AppError::Runtime(format!("local client cache insert failed: {err}")))?;
+
+            if let Some(storage) = &self.storage
+                && let Err(e) = storage.save_message(payload.clone()).await
+            {
+                eprintln!("warning: failed to save composed message to zpaq storage: {e}");
+            }
+
             None
         };
         self.compose_actions.fetch_add(1, Ordering::Relaxed);
@@ -921,6 +930,16 @@ impl AppState {
         .await
         .map_err(|e| AppError::Runtime(format!("router task join error: {e}")))??;
 
+        if let Some(storage) = &self.storage
+            && outcome.accepted
+            && let Some(msg) = &outcome.parsed_message
+        {
+            let bytes = msg.to_bytes();
+            if let Err(e) = storage.save_message(bytes).await {
+                eprintln!("warning: failed to save message to zpaq storage: {e}");
+            }
+        }
+
         if execute_forwards {
             for forward in outcome.forwards.clone() {
                 if let Err(err) = self.send_forward(&forward).await {
@@ -989,6 +1008,16 @@ impl AppState {
         .await
         .map_err(|e| AppError::Runtime(format!("router task join error: {e}")))??;
 
+        if let Some(storage) = &self.storage
+            && outcome.accepted
+            && let Some(msg) = &outcome.parsed_message
+        {
+            let bytes = msg.to_bytes();
+            if let Err(e) = storage.save_message(bytes).await {
+                eprintln!("warning: failed to save message to zpaq storage: {e}");
+            }
+        }
+
         if execute_forwards {
             for forward in outcome.forwards.clone() {
                 if let Err(err) = self.send_forward(&forward).await {
@@ -1051,6 +1080,13 @@ impl AppState {
             router.cache_local_client_message(&payload, CmrTimestamp::now_utc())
         })?
         .map_err(|err| AppError::Runtime(format!("local client cache insert failed: {err}")))?;
+
+        if let Some(storage) = &self.storage
+            && let Err(e) = storage.save_message(payload.clone()).await
+        {
+            eprintln!("warning: failed to save client plan message to zpaq storage: {e}");
+        }
+
         self.send_with_retry(
             &plan.destination,
             &payload,
@@ -1593,6 +1629,39 @@ async fn build_app_state(
     apply_static_keys(&mut router, config)?;
 
     let handshake_store = Arc::new(HandshakeStore::default());
+    let storage = if config.storage.enabled {
+        Some(Arc::new(StorageManager::new(
+            config.storage.path.clone(),
+            config.storage.max_restore_bytes,
+        )?))
+    } else {
+        None
+    };
+
+    // Restore messages from storage
+    if let Some(storage) = &storage {
+        match storage.load_all_messages().await {
+            Ok(messages) => {
+                let now = CmrTimestamp::now_utc();
+                let mut count = 0;
+                for msg_bytes in messages {
+                    if router
+                        .cache_local_client_message(&msg_bytes, now.clone())
+                        .is_ok()
+                    {
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    eprintln!("restored {count} messages from zpaq storage");
+                }
+            }
+            Err(err) => {
+                eprintln!("warning: failed to load messages from storage: {err}");
+            }
+        }
+    }
+
     let transport = Arc::new(
         TransportManager::new(
             config.local_address.clone(),
@@ -1610,6 +1679,7 @@ async fn build_app_state(
     Ok(AppState {
         router: Arc::new(Mutex::new(router)),
         transport,
+        storage,
         handshake_store,
         ingest_enabled: Arc::new(AtomicBool::new(true)),
         transport_enabled: Arc::new(AtomicBool::new(true)),
@@ -2841,8 +2911,8 @@ mod tests {
 
     use super::{
         extract_cmr_payload_from_email, loopback_http_target, normalize_ingest_path,
-        normalize_web_base_path, read_smtp_data, validate_client_identity, validate_dashboard_paths,
-        validate_handshake_callback_request,
+        normalize_web_base_path, read_smtp_data, validate_client_identity,
+        validate_dashboard_paths, validate_handshake_callback_request,
     };
 
     #[cfg(feature = "dashboard")]

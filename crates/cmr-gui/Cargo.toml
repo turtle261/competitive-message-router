@@ -7,12 +7,14 @@ rust-version.workspace = true
 description = "Native GTK4 GUI client for Competitive Message Routing (CMR)."
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
+keywords = ["cmr", "gui", "client", "gtk"]
+categories = ["gui", "network-programming"]
 
 [dependencies]
 cmr-client = { version = "0.3.0", path = "../cmr-client" }
 cmr-core = { version = "0.3.0", path = "../cmr-core" }
 dirs = "5"
-flate2 = "1"
 glib = "0.20"
 gtk4 = "0.9"
 hex = "0.4"

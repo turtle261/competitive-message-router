@@ -18,7 +18,10 @@ use crate::crypto::generate_key_hex;
 /// Creates a bold, large title label left-aligned with Pango markup.
 fn heading(text: &str) -> gtk::Label {
     let label = gtk::Label::new(None);
-    label.set_markup(&format!("<b><big>{}</big></b>", glib::markup_escape_text(text)));
+    label.set_markup(&format!(
+        "<b><big>{}</big></b>",
+        glib::markup_escape_text(text)
+    ));
     label.set_xalign(0.0);
     label
 }
@@ -136,10 +139,11 @@ fn build_identity_local_page() -> (gtk::ScrolledWindow, gtk::Entry, gtk::Entry, 
     path_entry.set_placeholder_text(Some("URL path, e.g. /cmr"));
     content.append(&path_entry);
 
-    content.append(&field_label("Advertised identity URL (optional but recommended)"));
+    content.append(&field_label(
+        "Advertised identity URL (optional but recommended)",
+    ));
     let advertised_entry = gtk::Entry::new();
-    advertised_entry
-        .set_placeholder_text(Some("http://public-host-or-ip:8080/"));
+    advertised_entry.set_placeholder_text(Some("http://public-host-or-ip:8080/"));
     content.append(&advertised_entry);
 
     content.append(&body_label(
@@ -282,6 +286,7 @@ fn next_page_name(current: &str, use_local: bool) -> Option<&'static str> {
 /// When the user completes all pages and clicks **Finish**, `on_done` is called
 /// with the finished [`Config`].  The caller is responsible for saving the
 /// config and transitioning to the main app UI.
+#[allow(clippy::too_many_lines)]
 pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 'static) {
     // ── Outer layout ────────────────────────────────────────────────────────
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -324,7 +329,8 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
     let (identity_type_page, local_radio, _email_radio) = build_identity_type_page();
     stack.add_named(&identity_type_page, Some("identity-type"));
 
-    let (identity_local_page, bind_entry, path_entry, advertised_entry) = build_identity_local_page();
+    let (identity_local_page, bind_entry, path_entry, advertised_entry) =
+        build_identity_local_page();
     stack.add_named(&identity_local_page, Some("identity-local"));
 
     let (identity_email_page, email_entry) = build_identity_email_page();
@@ -359,7 +365,7 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
                 let mut h = history.borrow_mut();
                 if h.len() > 1 {
                     h.pop();
-                    h.last().map(String::clone)
+                    h.last().cloned()
                 } else {
                     None
                 }
@@ -395,7 +401,7 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
             let current: String = history
                 .borrow()
                 .last()
-                .map(String::clone)
+                .cloned()
                 .unwrap_or_else(|| "welcome".to_owned());
 
             set_error(&error_label, "");
@@ -471,9 +477,8 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
 
             // Determine next page name.
             let use_local = local_radio.is_active();
-            let next = match next_page_name(current.as_str(), use_local) {
-                Some(p) => p,
-                None => return,
+            let Some(next) = next_page_name(current.as_str(), use_local) else {
+                return;
             };
 
             // Pre-populate summary text before showing it.

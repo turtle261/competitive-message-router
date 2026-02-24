@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "CMR peer daemon with HTTP/HTTPS/UDP listeners and multi-transport outbound delivery."
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 documentation = "https://docs.rs/cmr-peer"
 keywords = ["cmr", "peer", "routing", "daemon"]
 categories = ["network-programming", "command-line-utilities", "kolmogorov-complexity", "information-theory"]
@@ -37,5 +38,6 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 toml = "0.9.8"
 url = "2.5.7"
+zpaq_rs = "1.0.2"
 
 [dev-dependencies]
