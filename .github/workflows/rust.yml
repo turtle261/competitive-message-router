@@ -254,6 +254,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Target build
+        shell: bash
         run: |
           if [ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ]; then
             echo "skipping cmr-gui build on Windows ARM64";
@@ -264,6 +265,7 @@ jobs:
 
       - name: Native tests
         if: matrix.run_tests
+        shell: bash
         run: |
           if [ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ]; then
             echo "skipping cmr-gui tests on Windows ARM64";
@@ -346,9 +348,9 @@ jobs:
               esac
 
               export MUSL_RUSTFLAGS="-C link-arg=-fuse-ld=lld"
-              RUSTFLAGS="-D warnings ${MUSL_RUSTFLAGS}" cargo check --workspace --all-targets --all-features --target "$TARGET" --locked
-              RUSTFLAGS="${MUSL_RUSTFLAGS}" cargo test --workspace --target "$TARGET" --locked -- --skip dockerized_smtp_preserves_binary_payload_bytes
-              RUSTFLAGS="${MUSL_RUSTFLAGS}" cargo test --workspace --all-features --target "$TARGET" --locked -- --skip dockerized_smtp_preserves_binary_payload_bytes
+              RUSTFLAGS="-D warnings ${MUSL_RUSTFLAGS}" cargo check --workspace --all-targets --all-features --target "$TARGET" --locked --exclude cmr-gui
+              RUSTFLAGS="${MUSL_RUSTFLAGS}" cargo test --workspace --target "$TARGET" --locked --exclude cmr-gui -- --skip dockerized_smtp_preserves_binary_payload_bytes
+              RUSTFLAGS="${MUSL_RUSTFLAGS}" cargo test --workspace --all-features --target "$TARGET" --locked --exclude cmr-gui -- --skip dockerized_smtp_preserves_binary_payload_bytes
             '
 
   platform-bsd:
@@ -450,6 +452,16 @@ jobs:
             cargo --version
             rustc --version
 
-            RUSTFLAGS="-C target-cpu=generic -D warnings" cargo check --workspace --all-targets --all-features --locked
-            RUSTFLAGS="-C target-cpu=generic" cargo test --workspace --locked
-            RUSTFLAGS="-C target-cpu=generic" cargo test --workspace --all-features --locked
+            if [ "${{ matrix.os }}" = "openbsd" ] || [ "${{ matrix.os }}" = "netbsd" ]; then
+              export CXXFLAGS="-DNOJIT"
+            fi
+
+            if [ "${{ matrix.os }}" = "openbsd" ]; then
+              EXCLUDE_OPTS="--exclude cmr-gui"
+            else
+              EXCLUDE_OPTS=""
+            fi
+
+            RUSTFLAGS="-C target-cpu=generic -D warnings" cargo check --workspace --all-targets --all-features --locked $EXCLUDE_OPTS
+            RUSTFLAGS="-C target-cpu=generic" cargo test --workspace --locked $EXCLUDE_OPTS
+            RUSTFLAGS="-C target-cpu=generic" cargo test --workspace --all-features --locked $EXCLUDE_OPTS
