@@ -62,10 +62,12 @@ fn build_ui(app: &Application) {
                     config_path.display()
                 );
                 let path = config_path.clone();
+                let window_for_done = window.clone();
                 wizard::show_wizard(&window, move |config| {
                     if let Err(e) = config.save(&path) {
                         eprintln!("cmr-gui: failed to save config: {e}");
                     }
+                    app::show_main_app(&window_for_done, config);
                 });
             }
         }

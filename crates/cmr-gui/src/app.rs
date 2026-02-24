@@ -16,11 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cmr_client::{ClientTransportConfig, CmrClient, ReceivedMessage};
-use cmr_core::protocol::{CmrTimestamp, ParseContext, Signature, parse_message};
+use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, ParseContext, Signature, parse_message};
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
-use crate::config::{Config, IdentityConfig};
+use crate::config::{Config, IdentityConfig, IdentityProfile};
 use crate::distance::{format_distance, nearest_neighbor_distance};
 
 // ── Public entry point ───────────────────────────────────────────────────────
@@ -33,8 +33,25 @@ use crate::distance::{format_distance, nearest_neighbor_distance};
 pub fn show_main_app(window: &gtk4::ApplicationWindow, config: Config) {
     let handle = tokio::runtime::Handle::current();
 
+    let identity_profiles = match config.identity_profiles() {
+        Ok(profiles) => profiles,
+        Err(err) => {
+            eprintln!("cmr-gui: invalid identity configuration: {err}");
+            show_error_window(window, &format!("Invalid identity configuration:\n{err}"));
+            return;
+        }
+    };
+    let selected_profile = match config.selected_identity_profile() {
+        Ok(profile) => profile,
+        Err(err) => {
+            eprintln!("cmr-gui: failed to select active identity: {err}");
+            show_error_window(window, &format!("Invalid active identity:\n{err}"));
+            return;
+        }
+    };
+
     // ── Create the CMR client ─────────────────────────────────────────────
-    let cmr_identity = config.identity.address();
+    let cmr_identity = selected_profile.identity.address();
 
     let client_result = handle.block_on(async {
         CmrClient::new(cmr_identity.clone(), ClientTransportConfig::default()).await
@@ -80,19 +97,31 @@ pub fn show_main_app(window: &gtk4::ApplicationWindow, config: Config) {
         Arc::clone(&client),
         config.router.url.clone(),
         signing_enabled,
+        identity_profiles.clone(),
+        config.selected_identity,
     );
     notebook.append_page(&compose_tab, Some(&gtk::Label::new(Some("Compose"))));
 
-    match &config.identity {
-        IdentityConfig::Local { bind, path } => {
+    let local_profile = identity_profiles.iter().find_map(|profile| {
+        if let IdentityConfig::Local {
+            bind,
+            path,
+            advertised_address: _,
+        } = &profile.identity
+        {
+            Some((profile.name.clone(), bind.clone(), path.clone(), profile.identity.address()))
+        } else {
+            None
+        }
+    });
+
+    if let Some((name, bind, path, local_address)) = local_profile {
             let inbox_tab =
-                build_local_inbox_tab(bind.clone(), path.clone(), cmr_identity, &handle);
+                build_local_inbox_tab(bind, path, local_address, name, &handle);
             notebook.append_page(&inbox_tab, Some(&gtk::Label::new(Some("Inbox"))));
-        }
-        IdentityConfig::Email { email } => {
-            let inbox_tab = build_email_inbox_tab(email);
+    } else {
+            let inbox_tab = build_email_inbox_tab("no local inbox identity configured");
             notebook.append_page(&inbox_tab, Some(&gtk::Label::new(Some("Inbox"))));
-        }
     }
 
     outer.append(&notebook);
@@ -133,6 +162,8 @@ fn build_compose_tab(
     client: Arc<CmrClient>,
     router_url: String,
     sign: bool,
+    identities: Vec<IdentityProfile>,
+    selected_identity: usize,
 ) -> gtk::ScrolledWindow {
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -150,6 +181,37 @@ fn build_compose_tab(
         .halign(gtk::Align::Start)
         .build();
     outer.append(&compose_heading);
+
+    let identity_profiles = Rc::new(identities);
+    let identity_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    let identity_label = gtk::Label::builder()
+        .label("Sender identity")
+        .halign(gtk::Align::Start)
+        .build();
+    identity_row.append(&identity_label);
+
+    let identity_combo = gtk::ComboBoxText::new();
+    for (idx, profile) in identity_profiles.iter().enumerate() {
+        let shown = format!(
+            "{} ({}) — {}",
+            profile.name,
+            profile.identity.kind_label(),
+            profile.identity.address()
+        );
+        identity_combo.append(Some(&idx.to_string()), &shown);
+    }
+    let active_idx = selected_identity.min(identity_profiles.len().saturating_sub(1));
+    identity_combo.set_active(Some(u32::try_from(active_idx).unwrap_or(0)));
+    identity_row.append(&identity_combo);
+
+    let custom_identity = gtk::Entry::new();
+    custom_identity
+        .set_placeholder_text(Some("Optional override, e.g. http://public-client.example:8080/"));
+    identity_row.append(&custom_identity);
+    outer.append(&identity_row);
 
     let body_view = gtk::TextView::builder()
         .vexpand(true)
@@ -193,9 +255,23 @@ fn build_compose_tab(
         let router_url_c = router_url.clone();
         let body_view_c = body_view.clone();
         let status_c = status_label.clone();
+        let identity_combo_c = identity_combo.clone();
+        let custom_identity_c = custom_identity.clone();
+        let identities_c = Rc::clone(&identity_profiles);
         copy_btn.connect_clicked(move |btn| {
+            let sender = match resolve_sender_identity(
+                &identity_combo_c,
+                &custom_identity_c,
+                identities_c.as_slice(),
+            ) {
+                Ok(sender) => sender,
+                Err(err) => {
+                    show_status(&status_c, &err, true);
+                    return;
+                }
+            };
             let body = text_view_text(&body_view_c);
-            match client_c.build_message(body.as_bytes()) {
+            match build_message_for_sender(&sender, body.as_bytes()) {
                 Ok(msg) => match client_c.render_for_destination(&router_url_c, msg, sign) {
                     Ok(wire) => {
                         let wire_str = String::from_utf8_lossy(&wire).into_owned();
@@ -235,8 +311,22 @@ fn build_compose_tab(
         let router_url_c = router_url.clone();
         let body_view_c = body_view.clone();
         let status_c = status_label.clone();
+        let identity_combo_c = identity_combo.clone();
+        let custom_identity_c = custom_identity.clone();
+        let identities_c = Rc::clone(&identity_profiles);
         let tx = send_tx;
         send_btn.connect_clicked(move |_| {
+            let sender = match resolve_sender_identity(
+                &identity_combo_c,
+                &custom_identity_c,
+                identities_c.as_slice(),
+            ) {
+                Ok(sender) => sender,
+                Err(err) => {
+                    show_status(&status_c, &err, true);
+                    return;
+                }
+            };
             let body = text_view_text(&body_view_c);
             if body.trim().is_empty() {
                 show_status(&status_c, "Message body cannot be empty.", true);
@@ -245,10 +335,21 @@ fn build_compose_tab(
             show_status(&status_c, "Sending…", false);
             let client_c2 = Arc::clone(&client_c);
             let url = router_url_c.clone();
+            let sender2 = sender.clone();
+            let body_bytes = body.into_bytes();
             let tx2 = tx.clone();
             tokio::spawn(async move {
-                let result = client_c2.send_body(&url, body.as_bytes(), sign).await;
-                let _ = tx2.send(result.map_err(|e| e.to_string()));
+                let result = match build_message_for_sender(&sender2, &body_bytes)
+                    .and_then(|message| {
+                        client_c2
+                            .render_for_destination(&url, message, sign)
+                            .map_err(|e| e.to_string())
+                    })
+                {
+                    Ok(wire) => client_c2.send_wire(&url, &wire).await.map_err(|e| e.to_string()),
+                    Err(err) => Err(err),
+                };
+                let _ = tx2.send(result);
             });
         });
     }
@@ -415,13 +516,19 @@ fn build_email_inbox_tab(email: &str) -> gtk::Box {
     icon_label.add_css_class("title-2");
     outer.append(&icon_label);
 
-    let notice_text = format!(
-        "Your identity is mailto:{email}.\n\n\
-         Messages that the router matches to your posts are sent \
-         to your email address. Check your email inbox for replies.\n\n\
-         To receive messages inline here, configure a Local (HTTP) \
-         identity in the setup wizard."
-    );
+    let notice_text = if email.contains('@') {
+        format!(
+            "Your identity is mailto:{email}.\n\n\
+             Messages that the router matches to your posts are sent \
+             to your email address. Check your email inbox for replies.\n\n\
+             To receive messages inline here, configure a Local (HTTP) \
+             identity in the setup wizard."
+        )
+    } else {
+        "No local inbox identity is configured in this profile set.\n\n\
+         Add at least one Local (HTTP) identity to receive matched messages inline."
+            .to_owned()
+    };
     let notice = gtk::Label::builder()
         .label(&notice_text)
         .wrap(true)
@@ -439,7 +546,8 @@ fn build_email_inbox_tab(email: &str) -> gtk::Box {
 fn build_local_inbox_tab(
     bind: String,
     path: String,
-    _identity: String,
+    identity: String,
+    name: String,
     handle: &tokio::runtime::Handle,
 ) -> gtk::Box {
     let outer = gtk::Box::builder()
@@ -470,8 +578,10 @@ fn build_local_inbox_tab(
         Ok(mut inbox) => {
             let inbox_identity = inbox.identity().to_owned();
             status_label.set_markup(&format!(
-                "Listening on <tt>{}</tt>",
-                glib::markup_escape_text(&inbox_identity)
+                "Listening on <tt>{}</tt> (profile: {})\nAdvertised as <tt>{}</tt>",
+                glib::markup_escape_text(&inbox_identity),
+                glib::markup_escape_text(&name),
+                glib::markup_escape_text(&identity)
             ));
             outer.append(&status_label);
 
@@ -678,4 +788,51 @@ fn show_status(label: &gtk::Label, msg: &str, is_error: bool) {
         label.set_text(msg);
     }
     label.set_visible(true);
+}
+
+fn resolve_sender_identity(
+    identity_combo: &gtk::ComboBoxText,
+    custom_identity: &gtk::Entry,
+    identities: &[IdentityProfile],
+) -> Result<String, String> {
+    let custom = custom_identity.text();
+    let custom = custom.trim();
+    if !custom.is_empty() {
+        return validate_sender_identity(custom);
+    }
+
+    let selected = identity_combo.active();
+    let Some(selected) = selected else {
+        return Err("No sender identity selected".to_owned());
+    };
+    let idx = usize::try_from(selected).unwrap_or(0);
+    let Some(profile) = identities.get(idx) else {
+        return Err("Selected identity index is out of range".to_owned());
+    };
+    validate_sender_identity(&profile.identity.address())
+}
+
+fn validate_sender_identity(identity: &str) -> Result<String, String> {
+    let trimmed = identity.trim();
+    if trimmed.is_empty() {
+        return Err("Sender identity cannot be empty".to_owned());
+    }
+    if trimmed.contains('\r') || trimmed.contains('\n') {
+        return Err("Sender identity must not contain CR/LF".to_owned());
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn build_message_for_sender(sender: &str, body: &[u8]) -> Result<CmrMessage, String> {
+    if body.is_empty() {
+        return Err("message body cannot be empty".to_owned());
+    }
+    Ok(CmrMessage {
+        signature: Signature::Unsigned,
+        header: vec![MessageId {
+            timestamp: CmrTimestamp::now_utc(),
+            address: sender.to_owned(),
+        }],
+        body: body.to_vec(),
+    })
 }

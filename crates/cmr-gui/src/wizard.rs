@@ -10,7 +10,7 @@ use std::rc::Rc;
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
-use crate::config::{Config, IdentityConfig, KeyConfig, RouterConfig};
+use crate::config::{Config, IdentityConfig, IdentityProfile, KeyConfig, RouterConfig};
 use crate::crypto::generate_key_hex;
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -115,8 +115,8 @@ fn build_identity_type_page() -> (gtk::ScrolledWindow, gtk::CheckButton, gtk::Ch
 
 /// Builds the local HTTP identity configuration page (page 3a of 7).
 ///
-/// Returns `(page, bind_entry, path_entry)`.
-fn build_identity_local_page() -> (gtk::ScrolledWindow, gtk::Entry, gtk::Entry) {
+/// Returns `(page, bind_entry, path_entry, advertised_entry)`.
+fn build_identity_local_page() -> (gtk::ScrolledWindow, gtk::Entry, gtk::Entry, gtk::Entry) {
     let (scroll, content) = make_scrolled_page();
     content.append(&heading("Local HTTP Inbox"));
     content.append(&body_label(
@@ -132,15 +132,21 @@ fn build_identity_local_page() -> (gtk::ScrolledWindow, gtk::Entry, gtk::Entry) 
 
     content.append(&field_label("Path"));
     let path_entry = gtk::Entry::new();
-    path_entry.set_text("/cmr");
+    path_entry.set_text("/");
     path_entry.set_placeholder_text(Some("URL path, e.g. /cmr"));
     content.append(&path_entry);
+
+    content.append(&field_label("Advertised identity URL (optional but recommended)"));
+    let advertised_entry = gtk::Entry::new();
+    advertised_entry
+        .set_placeholder_text(Some("http://public-host-or-ip:8080/"));
+    content.append(&advertised_entry);
 
     content.append(&body_label(
         "The full inbox URL will be http://<host>:<port><path>. \
          Use 0.0.0.0 to listen on all interfaces.",
     ));
-    (scroll, bind_entry, path_entry)
+    (scroll, bind_entry, path_entry, advertised_entry)
 }
 
 /// Builds the email identity configuration page (page 3b of 7).
@@ -216,7 +222,7 @@ fn build_router_setup_page() -> (gtk::ScrolledWindow, gtk::Entry) {
 
     content.append(&field_label("Router URL"));
     let router_entry = gtk::Entry::new();
-    router_entry.set_text("http://localhost:7777/cmr");
+    router_entry.set_text("http://127.0.0.1:7171/");
     router_entry.set_placeholder_text(Some("http://host:port/path"));
     content.append(&router_entry);
 
@@ -318,7 +324,7 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
     let (identity_type_page, local_radio, _email_radio) = build_identity_type_page();
     stack.add_named(&identity_type_page, Some("identity-type"));
 
-    let (identity_local_page, bind_entry, path_entry) = build_identity_local_page();
+    let (identity_local_page, bind_entry, path_entry, advertised_entry) = build_identity_local_page();
     stack.add_named(&identity_local_page, Some("identity-local"));
 
     let (identity_email_page, email_entry) = build_identity_email_page();
@@ -379,6 +385,7 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
         let bind_entry = bind_entry.clone();
         let path_entry = path_entry.clone();
         let email_entry = email_entry.clone();
+        let advertised_entry = advertised_entry.clone();
         let key_entry = key_entry.clone();
         let router_entry = router_entry.clone();
         let summary_label = summary_label.clone();
@@ -434,6 +441,8 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
                         IdentityConfig::Local {
                             bind: bind_entry.text().to_string(),
                             path: path_entry.text().to_string(),
+                            advertised_address: Some(advertised_entry.text().to_string())
+                                .filter(|v| !v.trim().is_empty()),
                         }
                     } else {
                         IdentityConfig::Email {
@@ -441,7 +450,12 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
                         }
                     };
                     let config = Config {
-                        identity,
+                        identity: None,
+                        identities: vec![IdentityProfile {
+                            name: "default".to_owned(),
+                            identity,
+                        }],
+                        selected_identity: 0,
                         router: RouterConfig {
                             url: router_entry.text().to_string(),
                         },
@@ -465,10 +479,17 @@ pub fn show_wizard(window: &gtk4::ApplicationWindow, on_done: impl Fn(Config) + 
             // Pre-populate summary text before showing it.
             if next == "summary" {
                 let identity_block = if use_local {
+                    let advertised = advertised_entry.text();
+                    let advertised_line = if advertised.is_empty() {
+                        "  Advertised: <derived from bind>".to_owned()
+                    } else {
+                        format!("  Advertised: {advertised}")
+                    };
                     format!(
-                        "Identity:  Local HTTP\n  Bind:    {}\n  Path:    {}",
+                        "Identity:  Local HTTP\n  Bind:    {}\n  Path:    {}\n{}",
                         bind_entry.text(),
-                        path_entry.text()
+                        path_entry.text(),
+                        advertised_line,
                     )
                 } else {
                     format!("Identity:  Email (mailto:{})", email_entry.text())
