@@ -3,6 +3,7 @@ use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, Transpo
 use cmr_core::router::{CompressionError, CompressionOracle, Router};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use rand::RngCore;
 use sha2::Sha256;
 
 struct StubOracle;
@@ -19,8 +20,10 @@ impl CompressionOracle for StubOracle {
 
 #[test]
 fn verify_hmac_sha256_signature_format() {
-    // Generated key to avoid CodeQL "hardcoded credential" alerts
-    let key = &[0xAA_u8; 32];
+    let mut key_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut key_bytes);
+    let key = &key_bytes;
+
     let body = b"hello world";
     let mut msg = CmrMessage {
         signature: Signature::Unsigned,
@@ -56,8 +59,9 @@ fn verify_hmac_sha256_signature_format() {
 fn verify_hkdf_sha256_key_derivation() {
     let local = "http://alice";
     let remote = "https://bob"; // HTTPS required for ClearKey
-    // Generated key to avoid CodeQL "hardcoded credential" alerts
-    let clear_key = vec![0xBB_u8; 32];
+
+    let mut clear_key = vec![0u8; 32];
+    rand::rng().fill_bytes(&mut clear_key);
     let label = b"clear";
 
     // Setup router
