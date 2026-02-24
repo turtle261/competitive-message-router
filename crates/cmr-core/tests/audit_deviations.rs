@@ -1,6 +1,6 @@
+use cmr_core::policy::RoutingPolicy;
 use cmr_core::protocol::{CmrMessage, CmrTimestamp, MessageId, Signature, TransportKind};
 use cmr_core::router::{CompressionError, CompressionOracle, Router};
-use cmr_core::policy::RoutingPolicy;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -8,19 +8,11 @@ use sha2::Sha256;
 struct StubOracle;
 
 impl CompressionOracle for StubOracle {
-    fn compression_distance(
-        &self,
-        _left: &[u8],
-        _right: &[u8],
-    ) -> Result<f64, CompressionError> {
+    fn compression_distance(&self, _left: &[u8], _right: &[u8]) -> Result<f64, CompressionError> {
         Ok(0.5)
     }
 
-    fn intrinsic_dependence(
-        &self,
-        _data: &[u8],
-        _max_order: i64,
-    ) -> Result<f64, CompressionError> {
+    fn intrinsic_dependence(&self, _data: &[u8], _max_order: i64) -> Result<f64, CompressionError> {
         Ok(0.5)
     }
 }
@@ -31,12 +23,10 @@ fn verify_hmac_sha256_signature_format() {
     let body = b"hello world";
     let mut msg = CmrMessage {
         signature: Signature::Unsigned,
-        header: vec![
-            MessageId {
-                timestamp: CmrTimestamp::parse("2030/01/01 00:00:00").unwrap(),
-                address: "http://alice".to_owned(),
-            }
-        ],
+        header: vec![MessageId {
+            timestamp: CmrTimestamp::parse("2030/01/01 00:00:00").unwrap(),
+            address: "http://alice".to_owned(),
+        }],
         body: body.to_vec(),
     };
 
@@ -54,7 +44,11 @@ fn verify_hmac_sha256_signature_format() {
     mac.update(&msg.payload_without_signature_line());
     let expected_digest = mac.finalize().into_bytes();
 
-    assert_eq!(digest.as_slice(), expected_digest.as_slice(), "HMAC-SHA256 verification failed");
+    assert_eq!(
+        digest.as_slice(),
+        expected_digest.as_slice(),
+        "HMAC-SHA256 verification failed"
+    );
 }
 
 #[test]
@@ -75,21 +69,30 @@ fn verify_hkdf_sha256_key_derivation() {
 
     let msg = CmrMessage {
         signature: Signature::Unsigned,
-        header: vec![
-            MessageId {
-                timestamp: CmrTimestamp::parse("2030/01/01 00:00:00").unwrap(),
-                address: remote.to_owned(),
-            }
-        ],
+        header: vec![MessageId {
+            timestamp: CmrTimestamp::parse("2030/01/01 00:00:00").unwrap(),
+            address: remote.to_owned(),
+        }],
         body,
     };
 
     // Process incoming message
     // TransportKind::Https is required for ClearKey exchange
-    let outcome = router.process_incoming(&msg.to_bytes(), TransportKind::Https, CmrTimestamp::parse("2030/01/01 00:00:01").unwrap());
+    let outcome = router.process_incoming(
+        &msg.to_bytes(),
+        TransportKind::Https,
+        CmrTimestamp::parse("2030/01/01 00:00:01").unwrap(),
+    );
 
-    assert!(outcome.accepted, "Clear key exchange message was rejected: {:?}", outcome.drop_reason);
-    assert!(outcome.key_exchange_control, "Not identified as key exchange control");
+    assert!(
+        outcome.accepted,
+        "Clear key exchange message was rejected: {:?}",
+        outcome.drop_reason
+    );
+    assert!(
+        outcome.key_exchange_control,
+        "Not identified as key exchange control"
+    );
 
     // Retrieve derived key from router
     let derived_key = router.shared_key(remote).expect("Key not stored in router");
@@ -118,7 +121,12 @@ fn verify_hkdf_sha256_key_derivation() {
     info.extend_from_slice(right);
 
     let mut expected_key = [0u8; 32];
-    hk.expand(&info, &mut expected_key).expect("HKDF expand failed");
+    hk.expand(&info, &mut expected_key)
+        .expect("HKDF expand failed");
 
-    assert_eq!(derived_key, expected_key.as_slice(), "HKDF-SHA256 key derivation mismatch");
+    assert_eq!(
+        derived_key,
+        expected_key.as_slice(),
+        "HKDF-SHA256 key derivation mismatch"
+    );
 }
