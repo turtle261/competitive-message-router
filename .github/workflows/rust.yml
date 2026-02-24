@@ -229,7 +229,7 @@ jobs:
           brew install pkg-config gtk4
 
       - name: Install native GUI deps (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target != 'aarch64-pc-windows-msvc'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -254,13 +254,25 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Target build
-        run: cargo build --workspace --all-features --target ${{ matrix.target }} --locked
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ]; then
+            echo "skipping cmr-gui build on Windows ARM64";
+            cargo build --workspace --all-features --exclude cmr-gui --target ${{ matrix.target }} --locked;
+          else
+            cargo build --workspace --all-features --target ${{ matrix.target }} --locked;
+          fi
 
       - name: Native tests
         if: matrix.run_tests
         run: |
-          cargo test --workspace --locked -- --skip dockerized_smtp_preserves_binary_payload_bytes
-          cargo test --workspace --all-features --locked -- --skip dockerized_smtp_preserves_binary_payload_bytes
+          if [ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ]; then
+            echo "skipping cmr-gui tests on Windows ARM64";
+            cargo test --workspace --locked --exclude cmr-gui -- --skip dockerized_smtp_preserves_binary_payload_bytes;
+            cargo test --workspace --all-features --locked --exclude cmr-gui -- --skip dockerized_smtp_preserves_binary_payload_bytes;
+          else
+            cargo test --workspace --locked -- --skip dockerized_smtp_preserves_binary_payload_bytes;
+            cargo test --workspace --all-features --locked -- --skip dockerized_smtp_preserves_binary_payload_bytes;
+          fi
 
 
   platform-musl:
