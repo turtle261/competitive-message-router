@@ -34,6 +34,38 @@ async fn test_persistence_across_restarts() -> Result<(), Box<dyn std::error::Er
     config.listen.udp = None;
     config.listen.smtp = None;
 
+    // ensure the compressor binary exists; `cmr-peer` tests run independently of cmr-compressor
+    // so build it explicitly and point the config at the resulting executable. this avoids spawn
+    // errors when the binary isn't on PATH (CI was failing earlier).
+    //
+    // cargo automatically places workspace binaries under target/(debug|release)/,
+    // and our test binary lives in target/debug/deps; climb up two levels to reach the
+    // workspace target directory.
+    let workdir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(|p| p.to_path_buf())
+        .expect("unable to compute workspace root");
+    let bin_path = workdir.join("target").join("debug").join("cmr-compressor");
+    if !bin_path.is_file() {
+        // build compressor using cargo; ignore output but fail the test if build fails.
+        // build the compressor binary if necessary; attributes must be
+        // placed outside the chained call.
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.current_dir(&workdir);
+        #[allow(clippy::needless_borrows_for_generic_args)]
+        cmd.args(&["build", "-p", "cmr-compressor"]);
+        let status = cmd.status()?;
+        assert!(
+            status.success(),
+            "failed to build cmr-compressor for persistence test"
+        );
+        assert!(bin_path.is_file(), "built compressor binary not found");
+    }
+    // point the nested compressor config at the explicit path so that the
+    // worker client doesn't try to spawn a missing command from PATH.
+    config.compressor.command = bin_path.to_string_lossy().to_string();
+
     // 1. Start the peer first time
     let runtime = start_peer(config.clone()).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;

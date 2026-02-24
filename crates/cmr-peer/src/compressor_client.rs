@@ -126,17 +126,38 @@ fn sibling_worker_path(command: &str) -> Option<PathBuf> {
         return None;
     }
     let current = std::env::current_exe().ok()?;
-    let parent = current.parent()?;
-    let candidate = parent.join(command);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    #[cfg(windows)]
-    {
-        if !command.to_ascii_lowercase().ends_with(".exe") {
-            let exe_candidate = parent.join(format!("{command}.exe"));
-            if exe_candidate.is_file() {
-                return Some(exe_candidate);
+
+    // check same directory as the current executable (useful when installed)
+    if let Some(parent) = current.parent() {
+        let candidate = parent.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            if !command.to_ascii_lowercase().ends_with(".exe") {
+                let exe_candidate = parent.join(format!("{command}.exe"));
+                if exe_candidate.is_file() {
+                    return Some(exe_candidate);
+                }
+            }
+        }
+
+        // also check grandparent directory; during `cargo test` the test binary lives in
+        // target/debug/deps while the workspace binaries are in target/debug
+        if let Some(grand) = parent.parent() {
+            let candidate2 = grand.join(command);
+            if candidate2.is_file() {
+                return Some(candidate2);
+            }
+            #[cfg(windows)]
+            {
+                if !command.to_ascii_lowercase().ends_with(".exe") {
+                    let exe_c2 = grand.join(format!("{command}.exe"));
+                    if exe_c2.is_file() {
+                        return Some(exe_c2);
+                    }
+                }
             }
         }
     }
