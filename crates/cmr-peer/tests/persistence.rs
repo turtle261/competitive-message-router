@@ -46,7 +46,11 @@ async fn test_persistence_across_restarts() -> Result<(), Box<dyn std::error::Er
         .nth(2)
         .map(|p| p.to_path_buf())
         .expect("unable to compute workspace root");
-    let bin_path = workdir.join("target").join("debug").join("cmr-compressor");
+    let bin_name = format!(
+        "cmr-compressor{}",
+        std::env::consts::EXE_SUFFIX
+    );
+    let bin_path = workdir.join("target").join("debug").join(bin_name);
     if !bin_path.is_file() {
         // build compressor using cargo; ignore output but fail the test if build fails.
         // build the compressor binary if necessary; attributes must be
