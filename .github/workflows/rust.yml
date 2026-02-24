@@ -34,6 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native GUI deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libglib2.0-dev libgtk-4-dev
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -78,6 +84,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install native GUI deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libglib2.0-dev libgtk-4-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -124,6 +135,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native GUI deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libglib2.0-dev libgtk-4-dev
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -168,6 +184,7 @@ jobs:
       # when building fixed CI targets (notably aarch64-apple-darwin + ring).
       CARGO_BUILD_RUSTFLAGS: ""
       RUSTFLAGS: ""
+      VCPKGRS_DYNAMIC: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -198,6 +215,35 @@ jobs:
             run_tests: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install native GUI deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libglib2.0-dev libgtk-4-dev
+
+      - name: Install native GUI deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install pkg-config gtk4
+
+      - name: Install native GUI deps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $triplet = if ('${{ matrix.target }}' -like 'aarch64-*') { 'arm64-windows' } else { 'x64-windows' }
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            $env:VCPKG_INSTALLATION_ROOT = "$env:USERPROFILE/vcpkg"
+            if (-not (Test-Path $env:VCPKG_INSTALLATION_ROOT)) {
+              git clone https://github.com/microsoft/vcpkg $env:VCPKG_INSTALLATION_ROOT
+              & "$env:VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat"
+            }
+          }
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install "glib:$triplet" "gtk:$triplet"
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -258,6 +304,7 @@ jobs:
             alpine:3.23.3 \
             sh -euxc '
               apk add --no-cache bash build-base clang lld curl ca-certificates git musl-dev pkgconf
+              apk add --no-cache glib-dev gtk4.0-dev
               if ! command -v rustup >/dev/null 2>&1; then
                 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
               fi
@@ -370,6 +417,23 @@ jobs:
             }
 
             ensure_rust
+
+            ensure_gui_deps() {
+              if command -v pkg >/dev/null 2>&1; then
+                as_root pkg update -f || true
+                as_root pkg install -y pkgconf gtk4 glib || as_root pkg install -y pkgconf gtk4
+              elif command -v pkgin >/dev/null 2>&1; then
+                as_root pkgin -y update || true
+                as_root pkgin -y install pkgconf gtk4 glib2 || as_root pkgin -y install pkgconf gtk4
+              elif command -v pkg_add >/dev/null 2>&1; then
+                as_root pkg_add -I pkgconf gtk+4 glib2 || as_root pkg_add -I pkgconf gtk+4
+              else
+                echo "No supported package manager found to install GUI dependencies" >&2
+                exit 1
+              fi
+            }
+
+            ensure_gui_deps
             export PATH="/usr/local/bin:/usr/pkg/bin:$HOME/.cargo/bin:$PATH"
             cargo --version
             rustc --version
