@@ -207,7 +207,7 @@ cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime
 - SMTP inbound can be handled by the built-in `[listen.smtp]` listener or by your MTA piping to `receive-stdin`.
 - For HTTPS listener, provide PEM cert/key paths in config.
 - Use pairwise unique shared keys per peer.
-- Mahoney's V2.2 paper seemingly includes an error suggesting insecure raw SHA256 usage. We do not implement that error. We use `HMAC-SHA256` for message authentication (not raw `SHA256(key || message)`), and `HKDF-SHA256` to derive keys from RSA/DH shared secrets.
+- Mahoney's V2.2 paper seemingly includes an error suggesting insecure raw SHA256 usage. We do not implement that error. We use [RFC 2104](https://datatracker.ietf.org/doc/html/rfc2104) `HMAC-SHA256` for message authentication (not raw `SHA256(key || message)`), and [RFC 5869](https://datatracker.ietf.org/doc/html/rfc5869) `HKDF-SHA256` to derive keys from RSA/DH shared secrets.
 
 ## A1 Role Boundary
 
@@ -221,3 +221,9 @@ cargo run -p cmr-peer -- self-test --config cmr-peer.toml --spawn-runtime
 - [Economic incentives](https://mattmahoney.net/agi2.html#:~:text=4%2E%20Security%20and%20Economic%20Considerations)
 
 - [Long Term Safety & Intelligent Worm Hardening](https://mattmahoney.net/agi2.html#:~:text=5%2E%20Long%20Term%20Safety%20of%20AGI)
+
+
+## License
+- This is free software, which you may use under either the (1) Apache-2.0 License, or the (2) ISC License, at your choice. Those are available at (1) LICENSE-APACHE and (2) LICENSE respectively.
+- Contributing to this repository means you agree to submit all contributions under the above Licensing arrangement. In other words, such that it is available to others under either license(ISC and Apache-2.0), at the others choice. 
+- Don't forget to add your Copyright notice to the LICENSE file.

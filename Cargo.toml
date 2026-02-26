@@ -11,7 +11,7 @@ resolver = "3"
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "ISC OR Apache-2.0"
 description = "Competitive Message Routing (CMR) protocol implementation in Rust."
 repository = "https://github.com/turtle261/competitive-message-router"
 homepage = "https://github.com/turtle261/competitive-message-router"
